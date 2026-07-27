@@ -90,7 +90,7 @@ async def health_check():
 
 @app.post("/waitlist")
 async def join_waitlist(request: WaitlistRequest):
-    """Send welcome email - Rebuilt from scratch"""
+    """Waitlist - Always return fast, send email in background"""
     email = request.email.strip().lower()
 
     if not email or "@" not in email:
@@ -99,37 +99,38 @@ async def join_waitlist(request: WaitlistRequest):
     if not GMAIL_USER or not GMAIL_APP_PASSWORD:
         raise HTTPException(status_code=500, detail="Email service not configured")
 
-    # Send email directly (simple approach)
-    try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = "🎉 Welcome to AegisForge AI Waitlist"
-        msg["From"] = f"AegisForge AI <{GMAIL_USER}>"
-        msg["To"] = email
+    import threading
 
-        html = f"""
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 40px; background: #0f0f0f; color: white; border-radius: 12px;">
-            <h2 style="color: #00ffcc;">Welcome to AegisForge AI!</h2>
-            <p>Thank you for joining our waitlist. You're among the first to get early access.</p>
-            <p>We'll notify you when the full platform launches.</p>
-            <a href="https://aegisforge-landing.vercel.app" 
-               style="background: #00ffcc; color: black; padding: 12px 24px; text-decoration: none; border-radius: 8px; display: inline-block; margin-top: 20px;">
-                Try the Free Scanner
-            </a>
-        </div>
-        """
+    def send_email_in_background():
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = "🎉 Welcome to AegisForge AI Waitlist"
+            msg["From"] = f"AegisForge AI <{GMAIL_USER}>"
+            msg["To"] = email
 
-        msg.attach(MIMEText(html, "html"))
+            html = """
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 40px; background: #0f0f0f; color: white; border-radius: 12px;">
+                <h2 style="color: #00ffcc;">Welcome to AegisForge AI!</h2>
+                <p>Thank you for joining our waitlist.</p>
+                <p>We'll notify you when the full platform launches.</p>
+            </div>
+            """
 
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-            server.sendmail(GMAIL_USER, email, msg.as_string())
+            msg.attach(MIMEText(html, "html"))
 
-        print(f"✅ Email sent to {email}")
-        return {"success": True}
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+                server.sendmail(GMAIL_USER, email, msg.as_string())
 
-    except Exception as e:
-        print(f"❌ Email error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to send email")
+            print(f"✅ Email sent to {email}")
+        except Exception as e:
+            print(f"❌ Email failed: {str(e)}")
+
+    # Send email in background thread
+    threading.Thread(target=send_email_in_background, daemon=True).start()
+
+    # Return immediately
+    return {"success": True}
 
 # ============================================
 # MAIN SCAN ENDPOINT
