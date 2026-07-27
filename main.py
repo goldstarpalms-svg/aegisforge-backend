@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 import requests
 import ssl
 import socket
@@ -16,6 +16,12 @@ import resend
 # Email Configuration
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 FROM_EMAIL = os.getenv("FROM_EMAIL", "AegisForge AI <onboarding@resend.dev>")
+
+# Optional Supabase waitlist storage. Use a service-role key on the backend only.
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
+WAITLIST_TABLE = os.getenv("WAITLIST_TABLE", "waitlist")
+
 REQUEST_TIMEOUT = 10
 MAX_RESPONSE_BYTES = 2_000_000
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
@@ -190,14 +196,103 @@ async def health_check():
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "service": "AegisForge AI Scanner",
-        "version": "2.0.0"
+        "version": "2.0.0",
+        "email_configured": bool(RESEND_API_KEY),
+        "waitlist_storage_configured": bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
     }
 
 # ============================================
 # WAITLIST ENDPOINT
 # ============================================
 
-def send_waitlist_email(email: str) -> None:
+def supabase_configured() -> bool:
+    return bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+
+def supabase_headers(extra: Optional[dict] = None) -> dict:
+    headers = {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type": "application/json",
+    }
+    if extra:
+        headers.update(extra)
+    return headers
+
+def supabase_table_url() -> str:
+    return f"{SUPABASE_URL}/rest/v1/{WAITLIST_TABLE}"
+
+def get_waitlist_entry(email: str) -> Optional[dict]:
+    if not supabase_configured():
+        return None
+
+    response = requests.get(
+        supabase_table_url(),
+        headers=supabase_headers(),
+        params={
+            "select": "id,email,created_at",
+            "email": f"eq.{email}",
+            "limit": "1",
+        },
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    rows = response.json()
+    return rows[0] if rows else None
+
+def create_waitlist_entry(email: str) -> dict:
+    response = requests.post(
+        supabase_table_url(),
+        headers=supabase_headers({"Prefer": "return=representation"}),
+        json={"email": email, "source": "landing"},
+        timeout=REQUEST_TIMEOUT,
+    )
+
+    if response.status_code == 409:
+        existing = get_waitlist_entry(email)
+        if existing:
+            return existing
+
+    response.raise_for_status()
+    rows = response.json()
+    if not rows:
+        raise RuntimeError("Supabase did not return inserted waitlist row")
+    return rows[0]
+
+def get_waitlist_position(created_at: str) -> Optional[int]:
+    if not supabase_configured() or not created_at:
+        return None
+
+    response = requests.get(
+        supabase_table_url(),
+        headers=supabase_headers({"Prefer": "count=exact"}),
+        params={
+            "select": "id",
+            "created_at": f"lte.{created_at}",
+        },
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+
+    content_range = response.headers.get("content-range", "")
+    if "/" in content_range:
+        total = content_range.rsplit("/", 1)[-1]
+        if total.isdigit():
+            return int(total)
+    return None
+
+def register_waitlist_email(email: str) -> tuple[Optional[int], bool]:
+    """Store waitlist email and return (position, already_joined)."""
+    if not supabase_configured():
+        print("⚠️ Supabase waitlist storage not configured; sending email without storing position.")
+        return None, False
+
+    existing = get_waitlist_entry(email)
+    already_joined = existing is not None
+    entry = existing or create_waitlist_entry(email)
+    position = get_waitlist_position(entry.get("created_at"))
+    return position, already_joined
+
+def send_waitlist_email(email: str, position: Optional[int] = None, already_joined: bool = False) -> None:
     """Send the waitlist welcome email through Resend.
 
     Resend is used instead of Gmail SMTP because Render/cloud hosts can block or
@@ -209,24 +304,28 @@ def send_waitlist_email(email: str) -> None:
 
     resend.api_key = RESEND_API_KEY
 
-    text = """Welcome to AegisForge AI!
+    position_line = f"Your waitlist position is #{position}." if position else "You are officially on the early access list."
+    status_html = f"Your waitlist position is <strong>#{position}</strong>." if position else "You are confirmed on the early access waitlist."
+    greeting = "You're already on the AegisForge AI waitlist!" if already_joined else "You're officially on the waitlist!"
 
-Thank you for joining our waitlist. You are officially on the list.
+    text = f"""Welcome to AegisForge AI!
 
-We'll notify you when the full platform launches.
+{position_line}
+
+Thank you for joining our waitlist. We'll notify you when the full platform launches.
 
 AegisForge AI
 Build. Secure. Deploy.
 """
 
-    html = """
+    html = f"""
     <div style="font-family: Arial, sans-serif; max-width: 620px; margin: auto; padding: 40px; background: #0f0f0f; color: white; border-radius: 16px; border: 1px solid rgba(0,255,200,0.25);">
         <div style="font-size: 34px; margin-bottom: 12px;">⚡ AegisForge AI</div>
-        <h2 style="color: #00ffcc; margin: 0 0 18px;">You're officially on the waitlist!</h2>
+        <h2 style="color: #00ffcc; margin: 0 0 18px;">{greeting}</h2>
         <p style="font-size: 16px; line-height: 1.6; color: #e5e7eb;">Thank you for joining AegisForge AI.</p>
         <p style="font-size: 16px; line-height: 1.6; color: #e5e7eb;">We're building an autonomous AI platform that builds, secures, and deploys applications automatically.</p>
         <div style="margin: 28px 0; padding: 18px; background: rgba(0,255,200,0.08); border-left: 4px solid #00ffcc; border-radius: 10px;">
-            <strong style="color: #00ffcc;">Status:</strong> Confirmed on the early access waitlist.
+            <strong style="color: #00ffcc;">Status:</strong> {status_html}
         </div>
         <p style="font-size: 15px; line-height: 1.6; color: #cbd5e1;">We'll notify you when the full platform launches and when founder-tier access opens.</p>
         <p style="margin-top: 32px; color: #94a3b8; font-size: 13px;">AegisForge AI — Build. Secure. Deploy.</p>
@@ -246,7 +345,7 @@ Build. Secure. Deploy.
 
 @app.post("/waitlist")
 async def join_waitlist(request: WaitlistRequest):
-    """Join waitlist and return success only after Gmail confirms send."""
+    """Join waitlist, store email when configured, and send confirmation email."""
     email = request.email.strip().lower()
 
     if not EMAIL_RE.match(email):
@@ -256,12 +355,15 @@ async def join_waitlist(request: WaitlistRequest):
         raise HTTPException(status_code=500, detail="Email service not configured")
 
     try:
-        send_waitlist_email(email)
-        print(f"✅ Waitlist email sent to {email}")
+        position, already_joined = register_waitlist_email(email)
+        send_waitlist_email(email, position=position, already_joined=already_joined)
+        print(f"✅ Waitlist email sent to {email} (position={position}, already_joined={already_joined})")
         return {
             "success": True,
-            "message": "Welcome email sent",
-            "email": email
+            "message": "You are already on the waitlist" if already_joined else "Welcome email sent",
+            "email": email,
+            "position": position,
+            "already_joined": already_joined
         }
     except Exception as e:
         print(f"❌ Waitlist email failed for {email}: {str(e)}")
