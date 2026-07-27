@@ -356,6 +356,22 @@ async def join_waitlist(request: WaitlistRequest):
 
     try:
         position, already_joined = register_waitlist_email(email)
+    except requests.HTTPError as e:
+        status_code = e.response.status_code if e.response is not None else "unknown"
+        response_text = e.response.text[:500] if e.response is not None else str(e)
+        print(f"❌ Supabase waitlist storage failed for {email}: status={status_code}, response={response_text}")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not save your waitlist position. Please check Supabase service_role key and table setup."
+        )
+    except Exception as e:
+        print(f"❌ Supabase waitlist storage failed for {email}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not save your waitlist position. Please try again shortly."
+        )
+
+    try:
         send_waitlist_email(email, position=position, already_joined=already_joined)
         print(f"✅ Waitlist email sent to {email} (position={position}, already_joined={already_joined})")
         return {
@@ -366,8 +382,11 @@ async def join_waitlist(request: WaitlistRequest):
             "already_joined": already_joined
         }
     except Exception as e:
-        print(f"❌ Waitlist email failed for {email}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Could not send welcome email. Please try again shortly.")
+        print(f"❌ Resend waitlist email failed for {email}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Saved to waitlist, but could not send welcome email. Please check Resend API key, sender, or domain verification."
+        )
 
 # ============================================
 # MAIN SCAN ENDPOINT
