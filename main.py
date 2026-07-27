@@ -238,7 +238,14 @@ Build. Secure. Deploy.
     msg.attach(MIMEText(text, "plain"))
     msg.attach(MIMEText(html, "html"))
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as server:
+    # Use Gmail's STARTTLS submission port. Some cloud hosts block or timeout
+    # implicit SSL SMTP on port 465, while port 587 is the standard submission
+    # path for app-password based SMTP sending.
+    context = ssl.create_default_context()
+    with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
+        server.ehlo()
+        server.starttls(context=context)
+        server.ehlo()
         server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
         rejected = server.sendmail(GMAIL_USER, [email], msg.as_string())
         if rejected:
