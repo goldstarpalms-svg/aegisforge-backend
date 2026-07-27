@@ -199,9 +199,54 @@ async def health_check():
 # WAITLIST ENDPOINT
 # ============================================
 
+def send_waitlist_email(email: str) -> None:
+    """Send the waitlist welcome email through Gmail SMTP.
+
+    This function raises an exception if Gmail rejects the message or if SMTP
+    login/sending fails, so the API can return a real error to the frontend.
+    """
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = "🎉 Welcome to AegisForge AI Waitlist"
+    msg["From"] = f"AegisForge AI <{GMAIL_USER}>"
+    msg["To"] = email
+    msg["Reply-To"] = GMAIL_USER
+
+    text = """Welcome to AegisForge AI!
+
+Thank you for joining our waitlist. You are officially on the list.
+
+We'll notify you when the full platform launches.
+
+AegisForge AI
+Build. Secure. Deploy.
+"""
+
+    html = """
+    <div style="font-family: Arial, sans-serif; max-width: 620px; margin: auto; padding: 40px; background: #0f0f0f; color: white; border-radius: 16px; border: 1px solid rgba(0,255,200,0.25);">
+        <div style="font-size: 34px; margin-bottom: 12px;">⚡ AegisForge AI</div>
+        <h2 style="color: #00ffcc; margin: 0 0 18px;">You're officially on the waitlist!</h2>
+        <p style="font-size: 16px; line-height: 1.6; color: #e5e7eb;">Thank you for joining AegisForge AI.</p>
+        <p style="font-size: 16px; line-height: 1.6; color: #e5e7eb;">We're building an autonomous AI platform that builds, secures, and deploys applications automatically.</p>
+        <div style="margin: 28px 0; padding: 18px; background: rgba(0,255,200,0.08); border-left: 4px solid #00ffcc; border-radius: 10px;">
+            <strong style="color: #00ffcc;">Status:</strong> Confirmed on the early access waitlist.
+        </div>
+        <p style="font-size: 15px; line-height: 1.6; color: #cbd5e1;">We'll notify you when the full platform launches and when founder-tier access opens.</p>
+        <p style="margin-top: 32px; color: #94a3b8; font-size: 13px;">AegisForge AI — Build. Secure. Deploy.</p>
+    </div>
+    """
+
+    msg.attach(MIMEText(text, "plain"))
+    msg.attach(MIMEText(html, "html"))
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as server:
+        server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+        rejected = server.sendmail(GMAIL_USER, [email], msg.as_string())
+        if rejected:
+            raise RuntimeError(f"Gmail rejected recipient(s): {rejected}")
+
 @app.post("/waitlist")
 async def join_waitlist(request: WaitlistRequest):
-    """Waitlist - Always return fast, send email in background"""
+    """Join waitlist and return success only after Gmail confirms send."""
     email = request.email.strip().lower()
 
     if not EMAIL_RE.match(email):
@@ -210,38 +255,20 @@ async def join_waitlist(request: WaitlistRequest):
     if not GMAIL_USER or not GMAIL_APP_PASSWORD:
         raise HTTPException(status_code=500, detail="Email service not configured")
 
-    import threading
-
-    def send_email_in_background():
-        try:
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = "🎉 Welcome to AegisForge AI Waitlist"
-            msg["From"] = f"AegisForge AI <{GMAIL_USER}>"
-            msg["To"] = email
-
-            html = """
-            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 40px; background: #0f0f0f; color: white; border-radius: 12px;">
-                <h2 style="color: #00ffcc;">Welcome to AegisForge AI!</h2>
-                <p>Thank you for joining our waitlist.</p>
-                <p>We'll notify you when the full platform launches.</p>
-            </div>
-            """
-
-            msg.attach(MIMEText(html, "html"))
-
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-                server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-                server.sendmail(GMAIL_USER, email, msg.as_string())
-
-            print(f"✅ Email sent to {email}")
-        except Exception as e:
-            print(f"❌ Email failed: {str(e)}")
-
-    # Send email in background thread
-    threading.Thread(target=send_email_in_background, daemon=True).start()
-
-    # Return immediately
-    return {"success": True}
+    try:
+        send_waitlist_email(email)
+        print(f"✅ Waitlist email sent to {email}")
+        return {
+            "success": True,
+            "message": "Welcome email sent",
+            "email": email
+        }
+    except smtplib.SMTPAuthenticationError:
+        print("❌ Gmail authentication failed. Check GMAIL_USER and GMAIL_APP_PASSWORD.")
+        raise HTTPException(status_code=500, detail="Email authentication failed. Please contact support.")
+    except Exception as e:
+        print(f"❌ Waitlist email failed for {email}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Could not send welcome email. Please try again shortly.")
 
 # ============================================
 # MAIN SCAN ENDPOINT
