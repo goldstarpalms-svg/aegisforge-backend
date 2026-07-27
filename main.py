@@ -90,7 +90,7 @@ async def health_check():
 
 @app.post("/waitlist")
 async def join_waitlist(request: WaitlistRequest):
-    """Send welcome email to new waitlist signup using Gmail SMTP"""
+    """Send welcome email using Gmail SMTP (fast response)"""
     email = request.email.strip().lower()
 
     if not email or "@" not in email:
@@ -99,10 +99,10 @@ async def join_waitlist(request: WaitlistRequest):
     if not GMAIL_USER or not GMAIL_APP_PASSWORD:
         raise HTTPException(status_code=500, detail="Gmail credentials not configured")
 
-    # Return success immediately (email sent in background)
-    import asyncio
-    
-    async def send_email_background():
+    # Send email in background thread (not async)
+    import threading
+
+    def send_email():
         try:
             msg = MIMEMultipart("alternative")
             msg["Subject"] = "🎉 You're In! Welcome to the AegisForge AI Waitlist"
@@ -111,8 +111,6 @@ async def join_waitlist(request: WaitlistRequest):
 
             html_content = """
             <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 620px; margin: auto; background: #0f0f0f; color: #ffffff; padding: 48px 40px; border-radius: 16px; border: 1px solid #1f1f1f;">
-                
-                <!-- Header -->
                 <div style="text-align: center; margin-bottom: 32px;">
                     <div style="display: inline-flex; align-items: center; gap: 12px; margin-bottom: 16px;">
                         <span style="font-size: 42px;">⚡</span>
@@ -127,10 +125,9 @@ async def join_waitlist(request: WaitlistRequest):
                 </h1>
 
                 <p style="font-size: 17px; line-height: 1.7; color: #ccc; text-align: center; margin-bottom: 32px;">
-                    You're officially one of the first 1000 founders getting early access to <strong>AegisForge AI</strong> — the autonomous platform that builds, secures, and deploys full applications from a single prompt.
+                    You're officially one of the first 1000 founders getting early access to <strong>AegisForge AI</strong>.
                 </p>
 
-                <!-- CTA -->
                 <div style="text-align: center; margin: 32px 0;">
                     <a href="https://aegisforge-landing.vercel.app" 
                        style="background: #00ffcc; color: #000; padding: 16px 36px; text-decoration: none; border-radius: 10px; font-weight: 700; font-size: 16px; display: inline-block;">
@@ -138,18 +135,8 @@ async def join_waitlist(request: WaitlistRequest):
                     </a>
                 </div>
 
-                <div style="background: #1a1a1a; border-radius: 12px; padding: 24px; margin: 32px 0; font-size: 15px; line-height: 1.6;">
-                    <p style="margin: 0 0 12px 0; color: #00ffcc; font-weight: 600;">What happens next?</p>
-                    <ul style="margin: 0; padding-left: 20px; color: #ccc;">
-                        <li style="margin-bottom: 8px;">You'll receive early access before the public launch</li>
-                        <li style="margin-bottom: 8px;">Founder-tier pricing locked in for life</li>
-                        <li>Exclusive updates and behind-the-scenes access</li>
-                    </ul>
-                </div>
-
                 <p style="font-size: 14px; color: #666; text-align: center; margin-top: 40px;">
-                    Built with ❤️ in Lagos &amp; the world<br>
-                    <span style="font-size: 12px;">AegisForge AI — Security by Default. Speed by Design.</span>
+                    Built with ❤️ in Lagos &amp; the world
                 </p>
             </div>
             """
@@ -160,17 +147,15 @@ async def join_waitlist(request: WaitlistRequest):
                 server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
                 server.sendmail(GMAIL_USER, email, msg.as_string())
 
-            print(f"✅ Gmail email sent successfully to {email}")
+            print(f"✅ Email sent to {email}")
         except Exception as e:
-            print(f"❌ Failed to send email to {email}: {str(e)}")
+            print(f"❌ Email failed for {email}: {str(e)}")
 
-    # Fire and forget
-    asyncio.create_task(send_email_background())
+    # Start in background thread
+    threading.Thread(target=send_email, daemon=True).start()
 
-    return {
-        "success": True,
-        "message": f"Welcome email queued for {email}"
-    }
+    # Return instantly
+    return {"success": True, "message": "Email queued"}
 
 # ============================================
 # MAIN SCAN ENDPOINT
