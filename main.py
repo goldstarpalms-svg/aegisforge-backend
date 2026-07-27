@@ -93,8 +93,11 @@ async def join_waitlist(request: WaitlistRequest):
     if not email or "@" not in email:
         raise HTTPException(status_code=400, detail="Valid email required")
 
+    if not resend.api_key:
+        raise HTTPException(status_code=500, detail="Email service not configured")
+
     try:
-        resend.Emails.send({
+        response = resend.Emails.send({
             "from": "AegisForge AI <onboarding@resend.dev>",
             "to": email,
             "subject": "🎉 You're In! Welcome to the AegisForge AI Waitlist",
@@ -144,11 +147,15 @@ async def join_waitlist(request: WaitlistRequest):
             """
         })
 
+        print(f"✅ Email sent successfully to {email} | Resend ID: {response.get('id')}")
+        
         return {
             "success": True,
             "message": f"Welcome email sent to {email}"
         }
+        
     except Exception as e:
+        print(f"❌ Failed to send email to {email}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
 
 # ============================================
