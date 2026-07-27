@@ -99,75 +99,78 @@ async def join_waitlist(request: WaitlistRequest):
     if not GMAIL_USER or not GMAIL_APP_PASSWORD:
         raise HTTPException(status_code=500, detail="Gmail credentials not configured")
 
-    try:
-        # Create email
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = "🎉 You're In! Welcome to the AegisForge AI Waitlist"
-        msg["From"] = f"AegisForge AI <{GMAIL_USER}>"
-        msg["To"] = email
+    # Return success immediately (email sent in background)
+    import asyncio
+    
+    async def send_email_background():
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = "🎉 You're In! Welcome to the AegisForge AI Waitlist"
+            msg["From"] = f"AegisForge AI <{GMAIL_USER}>"
+            msg["To"] = email
 
-        html_content = """
-        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 620px; margin: auto; background: #0f0f0f; color: #ffffff; padding: 48px 40px; border-radius: 16px; border: 1px solid #1f1f1f;">
-            
-            <!-- Header -->
-            <div style="text-align: center; margin-bottom: 32px;">
-                <div style="display: inline-flex; align-items: center; gap: 12px; margin-bottom: 16px;">
-                    <span style="font-size: 42px;">⚡</span>
-                    <span style="font-size: 28px; font-weight: 700; color: #fff;">AegisForge</span>
-                    <span style="font-size: 22px; font-weight: 600; color: #00ffcc;">AI</span>
+            html_content = """
+            <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 620px; margin: auto; background: #0f0f0f; color: #ffffff; padding: 48px 40px; border-radius: 16px; border: 1px solid #1f1f1f;">
+                
+                <!-- Header -->
+                <div style="text-align: center; margin-bottom: 32px;">
+                    <div style="display: inline-flex; align-items: center; gap: 12px; margin-bottom: 16px;">
+                        <span style="font-size: 42px;">⚡</span>
+                        <span style="font-size: 28px; font-weight: 700; color: #fff;">AegisForge</span>
+                        <span style="font-size: 22px; font-weight: 600; color: #00ffcc;">AI</span>
+                    </div>
+                    <div style="background: #00ffcc; color: #000; display: inline-block; padding: 6px 18px; border-radius: 9999px; font-size: 13px; font-weight: 700;">EARLY ACCESS</div>
                 </div>
-                <div style="background: #00ffcc; color: #000; display: inline-block; padding: 6px 18px; border-radius: 9999px; font-size: 13px; font-weight: 700;">EARLY ACCESS</div>
+
+                <h1 style="font-size: 28px; line-height: 1.2; margin: 0 0 20px 0; text-align: center; color: #fff;">
+                    Welcome to the future of<br>building secure apps.
+                </h1>
+
+                <p style="font-size: 17px; line-height: 1.7; color: #ccc; text-align: center; margin-bottom: 32px;">
+                    You're officially one of the first 1000 founders getting early access to <strong>AegisForge AI</strong> — the autonomous platform that builds, secures, and deploys full applications from a single prompt.
+                </p>
+
+                <!-- CTA -->
+                <div style="text-align: center; margin: 32px 0;">
+                    <a href="https://aegisforge-landing.vercel.app" 
+                       style="background: #00ffcc; color: #000; padding: 16px 36px; text-decoration: none; border-radius: 10px; font-weight: 700; font-size: 16px; display: inline-block;">
+                        🚀 Try the Free AI Security Scanner
+                    </a>
+                </div>
+
+                <div style="background: #1a1a1a; border-radius: 12px; padding: 24px; margin: 32px 0; font-size: 15px; line-height: 1.6;">
+                    <p style="margin: 0 0 12px 0; color: #00ffcc; font-weight: 600;">What happens next?</p>
+                    <ul style="margin: 0; padding-left: 20px; color: #ccc;">
+                        <li style="margin-bottom: 8px;">You'll receive early access before the public launch</li>
+                        <li style="margin-bottom: 8px;">Founder-tier pricing locked in for life</li>
+                        <li>Exclusive updates and behind-the-scenes access</li>
+                    </ul>
+                </div>
+
+                <p style="font-size: 14px; color: #666; text-align: center; margin-top: 40px;">
+                    Built with ❤️ in Lagos &amp; the world<br>
+                    <span style="font-size: 12px;">AegisForge AI — Security by Default. Speed by Design.</span>
+                </p>
             </div>
+            """
 
-            <h1 style="font-size: 28px; line-height: 1.2; margin: 0 0 20px 0; text-align: center; color: #fff;">
-                Welcome to the future of<br>building secure apps.
-            </h1>
+            msg.attach(MIMEText(html_content, "html"))
 
-            <p style="font-size: 17px; line-height: 1.7; color: #ccc; text-align: center; margin-bottom: 32px;">
-                You're officially one of the first 1000 founders getting early access to <strong>AegisForge AI</strong> — the autonomous platform that builds, secures, and deploys full applications from a single prompt.
-            </p>
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+                server.sendmail(GMAIL_USER, email, msg.as_string())
 
-            <!-- CTA -->
-            <div style="text-align: center; margin: 32px 0;">
-                <a href="https://aegisforge-landing.vercel.app" 
-                   style="background: #00ffcc; color: #000; padding: 16px 36px; text-decoration: none; border-radius: 10px; font-weight: 700; font-size: 16px; display: inline-block;">
-                    🚀 Try the Free AI Security Scanner
-                </a>
-            </div>
+            print(f"✅ Gmail email sent successfully to {email}")
+        except Exception as e:
+            print(f"❌ Failed to send email to {email}: {str(e)}")
 
-            <div style="background: #1a1a1a; border-radius: 12px; padding: 24px; margin: 32px 0; font-size: 15px; line-height: 1.6;">
-                <p style="margin: 0 0 12px 0; color: #00ffcc; font-weight: 600;">What happens next?</p>
-                <ul style="margin: 0; padding-left: 20px; color: #ccc;">
-                    <li style="margin-bottom: 8px;">You'll receive early access before the public launch</li>
-                    <li style="margin-bottom: 8px;">Founder-tier pricing locked in for life</li>
-                    <li>Exclusive updates and behind-the-scenes access</li>
-                </ul>
-            </div>
+    # Fire and forget
+    asyncio.create_task(send_email_background())
 
-            <p style="font-size: 14px; color: #666; text-align: center; margin-top: 40px;">
-                Built with ❤️ in Lagos &amp; the world<br>
-                <span style="font-size: 12px;">AegisForge AI — Security by Default. Speed by Design.</span>
-            </p>
-        </div>
-        """
-
-        msg.attach(MIMEText(html_content, "html"))
-
-        # Send via Gmail SMTP
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-            server.sendmail(GMAIL_USER, email, msg.as_string())
-
-        print(f"✅ Gmail email sent successfully to {email}")
-        
-        return {
-            "success": True,
-            "message": f"Welcome email sent to {email}"
-        }
-        
-    except Exception as e:
-        print(f"❌ Failed to send email to {email}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
+    return {
+        "success": True,
+        "message": f"Welcome email queued for {email}"
+    }
 
 # ============================================
 # MAIN SCAN ENDPOINT
