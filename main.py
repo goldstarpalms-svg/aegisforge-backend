@@ -98,7 +98,7 @@ async def join_waitlist(request: WaitlistRequest):
 
     try:
         response = resend.Emails.send({
-            "from": "AegisForge AI <onboarding@resend.dev>",
+            "from": "AegisForge AI <goldstarpalms@gmail.com>",
             "to": email,
             "subject": "🎉 You're In! Welcome to the AegisForge AI Waitlist",
             "html": """
