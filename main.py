@@ -11,13 +11,11 @@ import re
 import time
 import ipaddress
 import os
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import resend
 
-# Gmail SMTP Configuration
-GMAIL_USER = os.getenv("GMAIL_USER")
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
+# Email Configuration
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+FROM_EMAIL = os.getenv("FROM_EMAIL", "AegisForge AI <onboarding@resend.dev>")
 REQUEST_TIMEOUT = 10
 MAX_RESPONSE_BYTES = 2_000_000
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
@@ -200,16 +198,16 @@ async def health_check():
 # ============================================
 
 def send_waitlist_email(email: str) -> None:
-    """Send the waitlist welcome email through Gmail SMTP.
+    """Send the waitlist welcome email through Resend.
 
-    This function raises an exception if Gmail rejects the message or if SMTP
-    login/sending fails, so the API can return a real error to the frontend.
+    Resend is used instead of Gmail SMTP because Render/cloud hosts can block or
+    timeout outbound SMTP ports. Resend sends over HTTPS, which is reliable on
+    Render.
     """
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = "🎉 Welcome to AegisForge AI Waitlist"
-    msg["From"] = f"AegisForge AI <{GMAIL_USER}>"
-    msg["To"] = email
-    msg["Reply-To"] = GMAIL_USER
+    if not RESEND_API_KEY:
+        raise RuntimeError("RESEND_API_KEY is not configured")
+
+    resend.api_key = RESEND_API_KEY
 
     text = """Welcome to AegisForge AI!
 
@@ -235,21 +233,16 @@ Build. Secure. Deploy.
     </div>
     """
 
-    msg.attach(MIMEText(text, "plain"))
-    msg.attach(MIMEText(html, "html"))
+    result = resend.Emails.send({
+        "from": FROM_EMAIL,
+        "to": [email],
+        "subject": "🎉 Welcome to AegisForge AI Waitlist",
+        "html": html,
+        "text": text,
+    })
 
-    # Use Gmail's STARTTLS submission port. Some cloud hosts block or timeout
-    # implicit SSL SMTP on port 465, while port 587 is the standard submission
-    # path for app-password based SMTP sending.
-    context = ssl.create_default_context()
-    with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
-        server.ehlo()
-        server.starttls(context=context)
-        server.ehlo()
-        server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-        rejected = server.sendmail(GMAIL_USER, [email], msg.as_string())
-        if rejected:
-            raise RuntimeError(f"Gmail rejected recipient(s): {rejected}")
+    if not result or not result.get("id"):
+        raise RuntimeError(f"Resend did not return a message id: {result}")
 
 @app.post("/waitlist")
 async def join_waitlist(request: WaitlistRequest):
@@ -259,7 +252,7 @@ async def join_waitlist(request: WaitlistRequest):
     if not EMAIL_RE.match(email):
         raise HTTPException(status_code=400, detail="Valid email required")
 
-    if not GMAIL_USER or not GMAIL_APP_PASSWORD:
+    if not RESEND_API_KEY:
         raise HTTPException(status_code=500, detail="Email service not configured")
 
     try:
@@ -270,9 +263,6 @@ async def join_waitlist(request: WaitlistRequest):
             "message": "Welcome email sent",
             "email": email
         }
-    except smtplib.SMTPAuthenticationError:
-        print("❌ Gmail authentication failed. Check GMAIL_USER and GMAIL_APP_PASSWORD.")
-        raise HTTPException(status_code=500, detail="Email authentication failed. Please contact support.")
     except Exception as e:
         print(f"❌ Waitlist email failed for {email}: {str(e)}")
         raise HTTPException(status_code=500, detail="Could not send welcome email. Please try again shortly.")
