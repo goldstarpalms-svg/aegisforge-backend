@@ -1,14 +1,15 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import List
 import requests
 import ssl
 import socket
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urlunparse, urljoin
 from datetime import datetime
 import re
 import time
+import ipaddress
 import os
 import smtplib
 from email.mime.text import MIMEText
@@ -17,6 +18,9 @@ from email.mime.multipart import MIMEMultipart
 # Gmail SMTP Configuration
 GMAIL_USER = os.getenv("GMAIL_USER")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
+REQUEST_TIMEOUT = 10
+MAX_RESPONSE_BYTES = 2_000_000
+EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 # Create FastAPI app
 app = FastAPI(
@@ -29,7 +33,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -40,6 +44,113 @@ class ScanRequest(BaseModel):
 
 class WaitlistRequest(BaseModel):
     email: str
+
+# ============================================
+# VALIDATION HELPERS
+# ============================================
+
+def normalize_scan_target(raw_url: str) -> tuple[str, str]:
+    """Normalize and validate user-submitted URLs before scanning.
+
+    Blocks localhost/private network targets to prevent SSRF against internal
+    infrastructure from the public scanner API.
+    """
+    url = (raw_url or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="URL is required")
+
+    if not re.match(r"^https?://", url, flags=re.IGNORECASE):
+        url = "https://" + url
+
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in {"http", "https"}:
+        raise HTTPException(status_code=400, detail="Only HTTP and HTTPS URLs are supported")
+
+    if not parsed.hostname:
+        raise HTTPException(status_code=400, detail="Valid hostname is required")
+
+    if parsed.username or parsed.password:
+        raise HTTPException(status_code=400, detail="URLs with embedded credentials are not allowed")
+
+    try:
+        port = parsed.port
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid port")
+
+    hostname = parsed.hostname.strip().rstrip(".").lower()
+    if not hostname or hostname in {"localhost", "localhost.localdomain"} or hostname.endswith(".localhost"):
+        raise HTTPException(status_code=400, detail="Localhost targets are not allowed")
+
+    try:
+        hostname.encode("idna").decode("ascii")
+    except UnicodeError:
+        raise HTTPException(status_code=400, detail="Invalid hostname")
+
+    # Reject direct IPs and DNS names resolving to private/internal ranges.
+    try:
+        ip_obj = ipaddress.ip_address(hostname)
+        resolved_ips = [ip_obj]
+    except ValueError:
+        try:
+            addr_info = socket.getaddrinfo(hostname, port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+            resolved_ips = []
+            for item in addr_info:
+                ip_text = item[4][0]
+                try:
+                    resolved_ips.append(ipaddress.ip_address(ip_text))
+                except ValueError:
+                    continue
+        except socket.gaierror:
+            raise HTTPException(status_code=400, detail="Hostname could not be resolved")
+
+    if not resolved_ips:
+        raise HTTPException(status_code=400, detail="Hostname could not be resolved")
+
+    for ip_obj in resolved_ips:
+        if (
+            ip_obj.is_private
+            or ip_obj.is_loopback
+            or ip_obj.is_link_local
+            or ip_obj.is_multicast
+            or ip_obj.is_reserved
+            or ip_obj.is_unspecified
+        ):
+            raise HTTPException(status_code=400, detail="Private or internal network targets are not allowed")
+
+    # Drop fragments; they are never sent to servers and only add noise.
+    normalized = urlunparse((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path or "", parsed.params, parsed.query, ""))
+    return normalized, hostname
+
+def trim_response_body(response: requests.Response) -> requests.Response:
+    """Avoid retaining unexpectedly huge response bodies for simple analysis."""
+    if len(response.content) > MAX_RESPONSE_BYTES:
+        response._content = response.content[:MAX_RESPONSE_BYTES]
+    return response
+
+def fetch_url(url: str, *, allow_redirects: bool = True) -> requests.Response:
+    """Shared outbound fetch settings with SSRF-safe redirect handling."""
+    headers = {"User-Agent": "AegisForgeAI-Scanner/2.0 (+https://aegisforge.ai)"}
+    current_url = url
+    history = []
+
+    for _ in range(6):
+        response = requests.get(current_url, timeout=REQUEST_TIMEOUT, allow_redirects=False, headers=headers)
+        trim_response_body(response)
+
+        if not allow_redirects or response.status_code not in {301, 302, 303, 307, 308}:
+            response.history = history
+            return response
+
+        location = response.headers.get("Location")
+        if not location:
+            response.history = history
+            return response
+
+        history.append(response)
+        next_url = urljoin(current_url, location)
+        current_url, _ = normalize_scan_target(next_url)
+
+    raise requests.TooManyRedirects("Too many redirects")
 
 # ============================================
 # BASIC ENDPOINTS
@@ -93,7 +204,7 @@ async def join_waitlist(request: WaitlistRequest):
     """Waitlist - Always return fast, send email in background"""
     email = request.email.strip().lower()
 
-    if not email or "@" not in email:
+    if not EMAIL_RE.match(email):
         raise HTTPException(status_code=400, detail="Valid email required")
 
     if not GMAIL_USER or not GMAIL_APP_PASSWORD:
@@ -139,18 +250,9 @@ async def join_waitlist(request: WaitlistRequest):
 @app.post("/scan")
 async def scan_website(request: ScanRequest):
     """Full comprehensive security scan"""
-    url = request.url.strip()
-
-    if not url:
-        raise HTTPException(status_code=400, detail="URL is required")
-
-    if not url.startswith(('http://', 'https://')):
-        url = 'https://' + url
+    url, domain = normalize_scan_target(request.url)
 
     try:
-        parsed = urlparse(url)
-        domain = parsed.netloc or parsed.path
-
         start_time = time.time()
 
         results = {
@@ -177,24 +279,17 @@ async def scan_website(request: ScanRequest):
 
         return results
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Scan failed: {str(e)}")
 
 @app.post("/quick-scan")
 async def quick_scan(request: ScanRequest):
     """Fast basic security scan"""
-    url = request.url.strip()
-
-    if not url:
-        raise HTTPException(status_code=400, detail="URL is required")
-
-    if not url.startswith(('http://', 'https://')):
-        url = 'https://' + url
+    url, domain = normalize_scan_target(request.url)
 
     try:
-        parsed = urlparse(url)
-        domain = parsed.netloc or parsed.path
-
         results = {
             "url": url,
             "domain": domain,
@@ -209,6 +304,8 @@ async def quick_scan(request: ScanRequest):
         results["risk_score"] = calculate_risk_score(results["checks"])
         return results
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Scan failed: {str(e)}")
 
@@ -246,7 +343,7 @@ def check_ssl(domain: str) -> dict:
 def check_headers(url: str) -> dict:
     """Check security headers"""
     try:
-        response = requests.get(url, timeout=10, allow_redirects=True)
+        response = fetch_url(url, allow_redirects=True)
         headers = response.headers
 
         security_headers = {
@@ -279,7 +376,7 @@ def check_headers(url: str) -> dict:
 def check_reachability(url: str) -> dict:
     """Check if website is reachable"""
     try:
-        response = requests.get(url, timeout=10, allow_redirects=True)
+        response = fetch_url(url, allow_redirects=True)
         return {
             "reachable": True,
             "status_code": response.status_code,
@@ -297,7 +394,7 @@ def check_reachability(url: str) -> dict:
 def detect_tech_stack(url: str) -> dict:
     """Detect technologies used by the website"""
     try:
-        response = requests.get(url, timeout=10, allow_redirects=True)
+        response = fetch_url(url, allow_redirects=True)
         headers = response.headers
         html = response.text.lower()
 
@@ -352,7 +449,7 @@ def detect_tech_stack(url: str) -> dict:
 def analyze_cookies(url: str) -> dict:
     """Analyze cookies for security and tracking"""
     try:
-        response = requests.get(url, timeout=10, allow_redirects=True)
+        response = fetch_url(url, allow_redirects=True)
         cookies = response.cookies
 
         cookie_list = []
@@ -387,7 +484,7 @@ def analyze_cookies(url: str) -> dict:
 def detect_cdn(url: str) -> dict:
     """Detect CDN usage"""
     try:
-        response = requests.get(url, timeout=10, allow_redirects=True)
+        response = fetch_url(url, allow_redirects=True)
         headers = response.headers
 
         cdn_indicators = {
@@ -420,7 +517,7 @@ def detect_cdn(url: str) -> dict:
 def check_redirects(url: str) -> dict:
     """Analyze redirect chain"""
     try:
-        response = requests.get(url, timeout=10, allow_redirects=True)
+        response = fetch_url(url, allow_redirects=True)
         redirect_chain = []
         for r in response.history:
             redirect_chain.append({
@@ -445,7 +542,7 @@ def check_https_enforcement(domain: str) -> dict:
             domain = domain.split(':')[0]
 
         http_url = f"http://{domain}"
-        response = requests.get(http_url, timeout=10, allow_redirects=False)
+        response = fetch_url(http_url, allow_redirects=False)
 
         redirects_to_https = False
         location = response.headers.get('Location', '')
@@ -467,11 +564,11 @@ def check_performance(url: str) -> dict:
     """Basic performance metrics"""
     try:
         start = time.time()
-        response1 = requests.get(url, timeout=10, allow_redirects=True)
+        response1 = fetch_url(url, allow_redirects=True)
         first_load = round((time.time() - start) * 1000)
 
         start = time.time()
-        response2 = requests.get(url, timeout=10, allow_redirects=True)
+        response2 = fetch_url(url, allow_redirects=True)
         second_load = round((time.time() - start) * 1000)
 
         content_size_kb = round(len(response1.content) / 1024, 2)
