@@ -90,72 +90,46 @@ async def health_check():
 
 @app.post("/waitlist")
 async def join_waitlist(request: WaitlistRequest):
-    """Send welcome email using Gmail SMTP (fast response)"""
+    """Send welcome email - Rebuilt from scratch"""
     email = request.email.strip().lower()
 
     if not email or "@" not in email:
         raise HTTPException(status_code=400, detail="Valid email required")
 
     if not GMAIL_USER or not GMAIL_APP_PASSWORD:
-        raise HTTPException(status_code=500, detail="Gmail credentials not configured")
+        raise HTTPException(status_code=500, detail="Email service not configured")
 
-    # Send email in background thread (not async)
-    import threading
+    # Send email directly (simple approach)
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = "🎉 Welcome to AegisForge AI Waitlist"
+        msg["From"] = f"AegisForge AI <{GMAIL_USER}>"
+        msg["To"] = email
 
-    def send_email():
-        try:
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = "🎉 You're In! Welcome to the AegisForge AI Waitlist"
-            msg["From"] = f"AegisForge AI <{GMAIL_USER}>"
-            msg["To"] = email
+        html = f"""
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 40px; background: #0f0f0f; color: white; border-radius: 12px;">
+            <h2 style="color: #00ffcc;">Welcome to AegisForge AI!</h2>
+            <p>Thank you for joining our waitlist. You're among the first to get early access.</p>
+            <p>We'll notify you when the full platform launches.</p>
+            <a href="https://aegisforge-landing.vercel.app" 
+               style="background: #00ffcc; color: black; padding: 12px 24px; text-decoration: none; border-radius: 8px; display: inline-block; margin-top: 20px;">
+                Try the Free Scanner
+            </a>
+        </div>
+        """
 
-            html_content = """
-            <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 620px; margin: auto; background: #0f0f0f; color: #ffffff; padding: 48px 40px; border-radius: 16px; border: 1px solid #1f1f1f;">
-                <div style="text-align: center; margin-bottom: 32px;">
-                    <div style="display: inline-flex; align-items: center; gap: 12px; margin-bottom: 16px;">
-                        <span style="font-size: 42px;">⚡</span>
-                        <span style="font-size: 28px; font-weight: 700; color: #fff;">AegisForge</span>
-                        <span style="font-size: 22px; font-weight: 600; color: #00ffcc;">AI</span>
-                    </div>
-                    <div style="background: #00ffcc; color: #000; display: inline-block; padding: 6px 18px; border-radius: 9999px; font-size: 13px; font-weight: 700;">EARLY ACCESS</div>
-                </div>
+        msg.attach(MIMEText(html, "html"))
 
-                <h1 style="font-size: 28px; line-height: 1.2; margin: 0 0 20px 0; text-align: center; color: #fff;">
-                    Welcome to the future of<br>building secure apps.
-                </h1>
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+            server.sendmail(GMAIL_USER, email, msg.as_string())
 
-                <p style="font-size: 17px; line-height: 1.7; color: #ccc; text-align: center; margin-bottom: 32px;">
-                    You're officially one of the first 1000 founders getting early access to <strong>AegisForge AI</strong>.
-                </p>
+        print(f"✅ Email sent to {email}")
+        return {"success": True}
 
-                <div style="text-align: center; margin: 32px 0;">
-                    <a href="https://aegisforge-landing.vercel.app" 
-                       style="background: #00ffcc; color: #000; padding: 16px 36px; text-decoration: none; border-radius: 10px; font-weight: 700; font-size: 16px; display: inline-block;">
-                        🚀 Try the Free AI Security Scanner
-                    </a>
-                </div>
-
-                <p style="font-size: 14px; color: #666; text-align: center; margin-top: 40px;">
-                    Built with ❤️ in Lagos &amp; the world
-                </p>
-            </div>
-            """
-
-            msg.attach(MIMEText(html_content, "html"))
-
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-                server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-                server.sendmail(GMAIL_USER, email, msg.as_string())
-
-            print(f"✅ Email sent to {email}")
-        except Exception as e:
-            print(f"❌ Email failed for {email}: {str(e)}")
-
-    # Start in background thread
-    threading.Thread(target=send_email, daemon=True).start()
-
-    # Return instantly
-    return {"success": True, "message": "Email queued"}
+    except Exception as e:
+        print(f"❌ Email error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to send email")
 
 # ============================================
 # MAIN SCAN ENDPOINT
