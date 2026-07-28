@@ -1,5 +1,6 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
 import requests
@@ -11,6 +12,8 @@ import re
 import time
 import ipaddress
 import os
+import csv
+import io
 import resend
 
 # Email Configuration
@@ -21,6 +24,14 @@ FROM_EMAIL = os.getenv("FROM_EMAIL", "AegisForge AI <onboarding@resend.dev>")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
 WAITLIST_TABLE = os.getenv("WAITLIST_TABLE", "waitlist")
+
+# Admin and abuse-protection configuration
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
+RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "3600"))
+WAITLIST_RATE_LIMIT = int(os.getenv("WAITLIST_RATE_LIMIT", "5"))
+SCAN_RATE_LIMIT = int(os.getenv("SCAN_RATE_LIMIT", "10"))
+QUICK_SCAN_RATE_LIMIT = int(os.getenv("QUICK_SCAN_RATE_LIMIT", "20"))
+RATE_LIMIT_STORE = {}
 
 REQUEST_TIMEOUT = 10
 MAX_RESPONSE_BYTES = 2_000_000
@@ -156,6 +167,47 @@ def fetch_url(url: str, *, allow_redirects: bool = True) -> requests.Response:
 
     raise requests.TooManyRedirects("Too many redirects")
 
+def get_client_ip(request: Request) -> str:
+    """Get the best-effort client IP behind Render/proxies."""
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return real_ip.strip()
+    return request.client.host if request.client else "unknown"
+
+def enforce_rate_limit(request: Request, bucket: str, limit: int) -> None:
+    """Simple in-memory per-IP rate limiter.
+
+    This protects Resend/Supabase/scanner from casual abuse. It resets on server
+    restart and should eventually be replaced with Redis for multi-instance use.
+    """
+    now = time.time()
+    client_ip = get_client_ip(request)
+    key = f"{bucket}:{client_ip}"
+    window_start = now - RATE_LIMIT_WINDOW_SECONDS
+
+    timestamps = [ts for ts in RATE_LIMIT_STORE.get(key, []) if ts > window_start]
+    if len(timestamps) >= limit:
+        retry_after = max(1, int(RATE_LIMIT_WINDOW_SECONDS - (now - timestamps[0])))
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many requests. Please try again in {retry_after} seconds."
+        )
+
+    timestamps.append(now)
+    RATE_LIMIT_STORE[key] = timestamps
+
+def require_admin(request: Request) -> None:
+    """Require ADMIN_API_KEY via x-admin-key header or ?admin_key= query."""
+    if not ADMIN_API_KEY:
+        raise HTTPException(status_code=500, detail="Admin API is not configured")
+
+    provided_key = request.headers.get("x-admin-key") or request.query_params.get("admin_key")
+    if provided_key != ADMIN_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid admin key")
+
 # ============================================
 # BASIC ENDPOINTS
 # ============================================
@@ -185,6 +237,9 @@ async def root():
             "scan": "/scan (POST)",
             "quick_scan": "/quick-scan (POST)",
             "waitlist": "/waitlist (POST)",
+            "waitlist_stats": "/waitlist/stats (GET)",
+            "admin_waitlist_stats": "/admin/waitlist/stats (GET)",
+            "admin_waitlist_export": "/admin/waitlist/export.csv (GET)",
             "docs": "/docs"
         }
     }
@@ -198,7 +253,9 @@ async def health_check():
         "service": "AegisForge AI Scanner",
         "version": "2.0.0",
         "email_configured": bool(RESEND_API_KEY),
-        "waitlist_storage_configured": bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+        "waitlist_storage_configured": bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY),
+        "admin_configured": bool(ADMIN_API_KEY),
+        "rate_limit_window_seconds": RATE_LIMIT_WINDOW_SECONDS
     }
 
 # ============================================
@@ -280,6 +337,42 @@ def get_waitlist_position(created_at: str) -> Optional[int]:
             return int(total)
     return None
 
+def get_waitlist_total() -> int:
+    if not supabase_configured():
+        return 0
+
+    response = requests.get(
+        supabase_table_url(),
+        headers=supabase_headers({"Prefer": "count=exact"}),
+        params={"select": "id", "limit": "1"},
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+
+    content_range = response.headers.get("content-range", "")
+    if "/" in content_range:
+        total = content_range.rsplit("/", 1)[-1]
+        if total.isdigit():
+            return int(total)
+    return 0
+
+def fetch_waitlist_rows(limit: int = 10000) -> list[dict]:
+    if not supabase_configured():
+        return []
+
+    response = requests.get(
+        supabase_table_url(),
+        headers=supabase_headers(),
+        params={
+            "select": "id,email,source,created_at",
+            "order": "created_at.asc",
+            "limit": str(limit),
+        },
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    return response.json()
+
 def register_waitlist_email(email: str) -> tuple[Optional[int], bool]:
     """Store waitlist email and return (position, already_joined)."""
     if not supabase_configured():
@@ -344,9 +437,10 @@ Build. Secure. Deploy.
         raise RuntimeError(f"Resend did not return a message id: {result}")
 
 @app.post("/waitlist")
-async def join_waitlist(request: WaitlistRequest):
+async def join_waitlist(payload: WaitlistRequest, request: Request):
     """Join waitlist, store email when configured, and send confirmation email."""
-    email = request.email.strip().lower()
+    enforce_rate_limit(request, "waitlist", WAITLIST_RATE_LIMIT)
+    email = payload.email.strip().lower()
 
     if not EMAIL_RE.match(email):
         raise HTTPException(status_code=400, detail="Valid email required")
@@ -388,14 +482,68 @@ async def join_waitlist(request: WaitlistRequest):
             detail="Saved to waitlist, but could not send welcome email. Please check Resend API key, sender, or domain verification."
         )
 
+@app.get("/waitlist/stats")
+async def waitlist_stats():
+    """Public waitlist stats for social proof."""
+    try:
+        total = get_waitlist_total()
+    except Exception as e:
+        print(f"❌ Waitlist stats failed: {str(e)}")
+        total = 0
+
+    return {
+        "total": total,
+        "first_1000_remaining": max(0, 1000 - total),
+        "storage_configured": supabase_configured()
+    }
+
+@app.get("/admin/waitlist/stats")
+async def admin_waitlist_stats(request: Request):
+    """Admin-only waitlist stats."""
+    require_admin(request)
+    total = get_waitlist_total()
+    return {
+        "total": total,
+        "first_1000_remaining": max(0, 1000 - total),
+        "storage_configured": supabase_configured(),
+        "table": WAITLIST_TABLE
+    }
+
+@app.get("/admin/waitlist/export.csv")
+async def export_waitlist_csv(request: Request):
+    """Admin-only CSV export of waitlist signups."""
+    require_admin(request)
+    rows = fetch_waitlist_rows()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["position", "id", "email", "source", "created_at"])
+    for position, row in enumerate(rows, start=1):
+        writer.writerow([
+            position,
+            row.get("id", ""),
+            row.get("email", ""),
+            row.get("source", ""),
+            row.get("created_at", ""),
+        ])
+
+    output.seek(0)
+    filename = f"aegisforge-waitlist-{datetime.now().strftime('%Y%m%d-%H%M%S')}.csv"
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
 # ============================================
 # MAIN SCAN ENDPOINT
 # ============================================
 
 @app.post("/scan")
-async def scan_website(request: ScanRequest):
+async def scan_website(payload: ScanRequest, request: Request):
     """Full comprehensive security scan"""
-    url, domain = normalize_scan_target(request.url)
+    enforce_rate_limit(request, "scan", SCAN_RATE_LIMIT)
+    url, domain = normalize_scan_target(payload.url)
 
     try:
         start_time = time.time()
@@ -430,9 +578,10 @@ async def scan_website(request: ScanRequest):
         raise HTTPException(status_code=500, detail=f"Scan failed: {str(e)}")
 
 @app.post("/quick-scan")
-async def quick_scan(request: ScanRequest):
+async def quick_scan(payload: ScanRequest, request: Request):
     """Fast basic security scan"""
-    url, domain = normalize_scan_target(request.url)
+    enforce_rate_limit(request, "quick_scan", QUICK_SCAN_RATE_LIMIT)
+    url, domain = normalize_scan_target(payload.url)
 
     try:
         results = {
