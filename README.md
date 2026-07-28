@@ -25,6 +25,8 @@ It powers:
 
 ## Required environment variables
 
+See `.env.example` for a copyable template.
+
 Set these in Render or your backend hosting platform.
 
 ### Email delivery
