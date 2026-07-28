@@ -4,7 +4,7 @@ FastAPI backend for AegisForge AI.
 
 It powers:
 
-- Website security scanning
+- Website security scanning with DNS, security.txt, robots.txt, SSL, header, cookie, CDN, HTTPS, and performance checks
 - Waitlist signup
 - Supabase waitlist storage and position tracking
 - Resend welcome emails
@@ -98,6 +98,23 @@ The scanner validates targets before making outbound requests. It blocks:
 - unsupported schemes like `ftp://`
 - URLs with embedded credentials
 - unsafe redirect targets
+
+## Current scanner checks
+
+The full `/scan` endpoint currently analyzes:
+
+- SSL/TLS certificate health
+- Security headers
+- Reachability and response time
+- Technology stack disclosure
+- Cookie security
+- CDN detection
+- Redirect chain
+- HTTPS enforcement
+- Performance timing
+- DNS resolution
+- `/.well-known/security.txt`
+- `/robots.txt`
 
 ## Local development
 

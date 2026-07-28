@@ -229,6 +229,7 @@ async def root():
             "Redirect Chain Analyzer",
             "Performance Metrics",
             "DNS Analysis",
+            "Security.txt and Robots.txt Checks",
             "HTTPS Enforcement Check",
             "Risk Scoring with AI Grading"
         ],
@@ -561,7 +562,10 @@ async def scan_website(payload: ScanRequest, request: Request):
                 "cdn": detect_cdn(url),
                 "redirects": check_redirects(url),
                 "https_enforcement": check_https_enforcement(domain),
-                "performance": check_performance(url)
+                "performance": check_performance(url),
+                "dns": check_dns(domain),
+                "security_txt": check_security_txt(url),
+                "robots_txt": check_robots_txt(url)
             }
         }
 
@@ -591,7 +595,8 @@ async def quick_scan(payload: ScanRequest, request: Request):
             "checks": {
                 "ssl": check_ssl(domain),
                 "headers": check_headers(url),
-                "reachability": check_reachability(url)
+                "reachability": check_reachability(url),
+                "dns": check_dns(domain)
             }
         }
 
@@ -733,9 +738,17 @@ def detect_tech_stack(url: str) -> dict:
         if detected["cms"]:
             total_tech += 1
 
+        disclosure_penalty = 0
+        if detected["server"] and detected["server"] != "Unknown":
+            disclosure_penalty += 10
+        if detected["powered_by"] and detected["powered_by"] != "Not disclosed":
+            disclosure_penalty += 20
+
         return {
             "detected": detected,
-            "total_technologies": total_tech
+            "total_technologies": total_tech,
+            "score": max(60, 100 - disclosure_penalty),
+            "disclosure_note": "Less server/framework disclosure is generally safer."
         }
     except Exception as e:
         return {"error": str(e)}
@@ -803,7 +816,8 @@ def detect_cdn(url: str) -> dict:
         return {
             "using_cdn": len(detected_cdns) > 0,
             "cdns_detected": detected_cdns,
-            "count": len(detected_cdns)
+            "count": len(detected_cdns),
+            "score": 100 if detected_cdns else 60
         }
     except Exception as e:
         return {"error": str(e)}
@@ -820,11 +834,13 @@ def check_redirects(url: str) -> dict:
                 "status_code": r.status_code
             })
 
+        total_redirects = len(response.history)
         return {
-            "total_redirects": len(response.history),
+            "total_redirects": total_redirects,
             "final_url": response.url,
             "redirect_chain": redirect_chain,
-            "has_redirects": len(response.history) > 0
+            "has_redirects": total_redirects > 0,
+            "score": 100 if total_redirects <= 2 else max(50, 100 - (total_redirects * 10))
         }
     except Exception as e:
         return {"error": str(e)}
@@ -887,6 +903,93 @@ def check_performance(url: str) -> dict:
         }
     except Exception as e:
         return {"error": str(e), "score": 0}
+
+def check_dns(domain: str) -> dict:
+    """Basic DNS resolution analysis."""
+    try:
+        if ':' in domain:
+            domain = domain.split(':')[0]
+
+        addr_info = socket.getaddrinfo(domain, None, type=socket.SOCK_STREAM)
+        ipv4 = sorted({item[4][0] for item in addr_info if item[0] == socket.AF_INET})
+        ipv6 = sorted({item[4][0] for item in addr_info if item[0] == socket.AF_INET6})
+
+        return {
+            "resolves": bool(ipv4 or ipv6),
+            "ipv4_addresses": ipv4[:10],
+            "ipv6_addresses": ipv6[:10],
+            "ipv4_count": len(ipv4),
+            "ipv6_count": len(ipv6),
+            "score": 100 if (ipv4 or ipv6) else 0
+        }
+    except Exception as e:
+        return {"resolves": False, "error": str(e), "score": 0}
+
+def _origin_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+def check_security_txt(url: str) -> dict:
+    """Check for RFC 9116 security.txt locations."""
+    try:
+        origin = _origin_from_url(url)
+        locations = [
+            f"{origin}/.well-known/security.txt",
+            f"{origin}/security.txt",
+        ]
+
+        attempts = []
+        for location in locations:
+            try:
+                response = fetch_url(location, allow_redirects=True)
+                found = response.status_code == 200 and "Contact:" in response.text[:5000]
+                attempts.append({
+                    "url": location,
+                    "status_code": response.status_code,
+                    "found": found
+                })
+                if found:
+                    text = response.text[:5000]
+                    return {
+                        "found": True,
+                        "url": location,
+                        "status_code": response.status_code,
+                        "has_contact": "Contact:" in text,
+                        "has_expires": "Expires:" in text,
+                        "has_policy": "Policy:" in text,
+                        "score": 100
+                    }
+            except Exception as e:
+                attempts.append({"url": location, "error": str(e), "found": False})
+
+        return {
+            "found": False,
+            "attempts": attempts,
+            "score": 40,
+            "recommendation": "Add /.well-known/security.txt with a security contact policy."
+        }
+    except Exception as e:
+        return {"found": False, "error": str(e), "score": 40}
+
+def check_robots_txt(url: str) -> dict:
+    """Check for robots.txt presence and basic accessibility."""
+    try:
+        origin = _origin_from_url(url)
+        robots_url = f"{origin}/robots.txt"
+        response = fetch_url(robots_url, allow_redirects=True)
+        found = response.status_code == 200
+        text = response.text[:5000] if found else ""
+
+        return {
+            "found": found,
+            "url": robots_url,
+            "status_code": response.status_code,
+            "has_sitemap": "sitemap:" in text.lower(),
+            "has_disallow": "disallow:" in text.lower(),
+            "score": 100 if found else 70
+        }
+    except Exception as e:
+        return {"found": False, "error": str(e), "score": 70}
 
 # ============================================
 # RISK SCORING & RECOMMENDATIONS
@@ -962,6 +1065,24 @@ def generate_recommendations(checks: dict) -> List[dict]:
                 "category": "Infrastructure",
                 "issue": "Not using a CDN",
                 "fix": "Consider Cloudflare or similar CDN for speed and security"
+            })
+
+    if "security_txt" in checks:
+        if not checks["security_txt"].get("found"):
+            recommendations.append({
+                "priority": "low",
+                "category": "Security Policy",
+                "issue": "Missing security.txt",
+                "fix": "Add /.well-known/security.txt so researchers know how to report vulnerabilities responsibly"
+            })
+
+    if "robots_txt" in checks:
+        if checks["robots_txt"].get("found") and not checks["robots_txt"].get("has_sitemap"):
+            recommendations.append({
+                "priority": "low",
+                "category": "SEO / Crawling",
+                "issue": "robots.txt has no sitemap reference",
+                "fix": "Add a Sitemap line to robots.txt to help search engines discover your pages"
             })
 
     return recommendations
