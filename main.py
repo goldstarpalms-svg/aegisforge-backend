@@ -24,6 +24,7 @@ FROM_EMAIL = os.getenv("FROM_EMAIL", "AegisForge AI <onboarding@resend.dev>")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
 WAITLIST_TABLE = os.getenv("WAITLIST_TABLE", "waitlist")
+PREVIEW_REQUESTS_TABLE = os.getenv("PREVIEW_REQUESTS_TABLE", "preview_requests")
 
 # Admin and abuse-protection configuration
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
@@ -283,6 +284,9 @@ def supabase_headers(extra: Optional[dict] = None) -> dict:
 
 def supabase_table_url() -> str:
     return f"{SUPABASE_URL}/rest/v1/{WAITLIST_TABLE}"
+
+def supabase_preview_table_url() -> str:
+    return f"{SUPABASE_URL}/rest/v1/{PREVIEW_REQUESTS_TABLE}"
 
 def get_waitlist_entry(email: str) -> Optional[dict]:
     if not supabase_configured():
@@ -623,6 +627,47 @@ CATEGORY_PRESETS = {
     }
 }
 
+def save_preview_request(idea: str, project_type: str, category: str, generated_name: str) -> None:
+    """Best-effort storage for preview requests.
+
+    Preview generation should still work even if analytics storage fails.
+    """
+    if not supabase_configured():
+        return
+
+    try:
+        response = requests.post(
+            supabase_preview_table_url(),
+            headers=supabase_headers({"Prefer": "return=minimal"}),
+            json={
+                "idea": idea,
+                "project_type": project_type or "auto",
+                "detected_category": category,
+                "generated_name": generated_name,
+            },
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+    except Exception as e:
+        print(f"⚠️ Preview request storage failed: {str(e)}")
+
+def fetch_preview_request_rows(limit: int = 10000) -> list[dict]:
+    if not supabase_configured():
+        return []
+
+    response = requests.get(
+        supabase_preview_table_url(),
+        headers=supabase_headers(),
+        params={
+            "select": "id,idea,project_type,detected_category,generated_name,created_at",
+            "order": "created_at.desc",
+            "limit": str(limit),
+        },
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    return response.json()
+
 def detect_preview_category(idea: str, project_type: str = "auto") -> str:
     normalized_type = (project_type or "auto").strip().lower().replace(" ", "_")
     if normalized_type in CATEGORY_PRESETS:
@@ -668,7 +713,7 @@ async def generate_preview(payload: PreviewRequest, request: Request):
     category = detect_preview_category(idea, payload.project_type or "auto")
     preset = personalize_preview(CATEGORY_PRESETS[category], idea, category)
 
-    return {
+    response_payload = {
         "success": True,
         "category": category,
         "layout": preset["layout"],
@@ -689,8 +734,38 @@ async def generate_preview(payload: PreviewRequest, request: Request):
             "Run security checks before launch",
             "Launch to a small beta group and improve from feedback"
         ],
-        "disclaimer": "This is a no-cost smart preview generated from templates and rules. Full AI build modules are coming soon."
+        "disclaimer": "This is a smart preview generated from guided templates and rules. Full AI build modules are coming soon."
     }
+
+    save_preview_request(idea, payload.project_type or "auto", category, preset["name"])
+    return response_payload
+
+@app.get("/admin/previews/export.csv")
+async def export_preview_requests_csv(request: Request):
+    """Admin-only CSV export of preview generator requests."""
+    require_admin(request)
+    rows = fetch_preview_request_rows()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["id", "idea", "project_type", "detected_category", "generated_name", "created_at"])
+    for row in rows:
+        writer.writerow([
+            row.get("id", ""),
+            row.get("idea", ""),
+            row.get("project_type", ""),
+            row.get("detected_category", ""),
+            row.get("generated_name", ""),
+            row.get("created_at", ""),
+        ])
+
+    output.seek(0)
+    filename = f"aegisforge-preview-requests-{datetime.now().strftime('%Y%m%d-%H%M%S')}.csv"
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
 
 # ============================================
 # MAIN SCAN ENDPOINT

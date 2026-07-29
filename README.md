@@ -19,7 +19,8 @@ It powers:
 | `GET` | `/waitlist/stats` | Public waitlist count and remaining founder spots |
 | `POST` | `/preview/generate` | No-cost smart app/website preview generator |
 | `GET` | `/admin/waitlist/stats` | Admin waitlist stats, protected by `ADMIN_API_KEY` |
-| `GET` | `/admin/waitlist/export.csv` | Admin CSV export, protected by `ADMIN_API_KEY` |
+| `GET` | `/admin/waitlist/export.csv` | Admin waitlist CSV export, protected by `ADMIN_API_KEY` |
+| `GET` | `/admin/previews/export.csv` | Admin preview request CSV export, protected by `ADMIN_API_KEY` |
 | `POST` | `/scan` | Full website security scan |
 | `POST` | `/quick-scan` | Basic SSL/header/reachability scan |
 | `GET` | `/docs` | FastAPI Swagger docs |
@@ -49,6 +50,7 @@ FROM_EMAIL=AegisForge AI <waitlist@yourdomain.com>
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
 WAITLIST_TABLE=waitlist
+PREVIEW_REQUESTS_TABLE=preview_requests
 ```
 
 `WAITLIST_TABLE` is optional. It defaults to `waitlist`.
@@ -77,11 +79,20 @@ curl -H "x-admin-key: $ADMIN_API_KEY" https://aegisforge-backend.onrender.com/ad
 
 Run the SQL in `SUPABASE_WAITLIST_SETUP.sql` from the Supabase SQL Editor.
 
-Expected table columns:
+Expected `waitlist` table columns:
 
 - `id`
 - `email`
 - `source`
+- `created_at`
+
+Expected `preview_requests` table columns:
+
+- `id`
+- `idea`
+- `project_type`
+- `detected_category`
+- `generated_name`
 - `created_at`
 
 ## Abuse protection
@@ -160,3 +171,5 @@ web: uvicorn main:app --host 0.0.0.0 --port $PORT
 - launch plan
 
 This gives visitors a useful preview while the full AI modules are still coming soon.
+
+Preview requests are stored best-effort in Supabase when `PREVIEW_REQUESTS_TABLE` exists. If storage fails, preview generation still works.
