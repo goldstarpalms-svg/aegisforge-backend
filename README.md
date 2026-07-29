@@ -17,6 +17,7 @@ It powers:
 | `GET` | `/health` | Health/config check |
 | `POST` | `/waitlist` | Store waitlist email and send confirmation email |
 | `GET` | `/waitlist/stats` | Public waitlist count and remaining founder spots |
+| `POST` | `/preview/generate` | No-cost smart app/website preview generator |
 | `GET` | `/admin/waitlist/stats` | Admin waitlist stats, protected by `ADMIN_API_KEY` |
 | `GET` | `/admin/waitlist/export.csv` | Admin CSV export, protected by `ADMIN_API_KEY` |
 | `POST` | `/scan` | Full website security scan |
@@ -143,3 +144,19 @@ This repo includes a Render-compatible `Procfile`:
 ```txt
 web: uvicorn main:app --host 0.0.0.0 --port $PORT
 ```
+
+## No-cost Smart Preview Engine
+
+`POST /preview/generate` creates an app or website concept preview without calling paid AI APIs. It uses keyword detection, templates, and rule-based logic to return:
+
+- category and layout
+- product name and tagline
+- roles
+- features
+- pages/screens
+- database plan
+- security checklist
+- monetization ideas
+- launch plan
+
+This gives visitors a useful preview while the full AI modules are still coming soon.

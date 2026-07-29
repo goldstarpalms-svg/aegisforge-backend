@@ -60,6 +60,10 @@ class ScanRequest(BaseModel):
 class WaitlistRequest(BaseModel):
     email: str
 
+class PreviewRequest(BaseModel):
+    idea: str
+    project_type: Optional[str] = "auto"
+
 # ============================================
 # VALIDATION HELPERS
 # ============================================
@@ -239,6 +243,7 @@ async def root():
             "quick_scan": "/quick-scan (POST)",
             "waitlist": "/waitlist (POST)",
             "waitlist_stats": "/waitlist/stats (GET)",
+            "preview_generator": "/preview/generate (POST)",
             "admin_waitlist_stats": "/admin/waitlist/stats (GET)",
             "admin_waitlist_export": "/admin/waitlist/export.csv (GET)",
             "docs": "/docs"
@@ -535,6 +540,157 @@ async def export_waitlist_csv(request: Request):
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
+
+# ============================================
+# NO-COST SMART PREVIEW ENGINE
+# ============================================
+
+PREVIEW_KEYWORDS = {
+    "marketplace": ["marketplace", "delivery", "vendor", "rider", "restaurant", "booking platform", "connect buyers", "multi vendor", "multi-vendor"],
+    "ecommerce": ["store", "shop", "ecommerce", "e-commerce", "fashion", "products", "cart", "checkout", "inventory"],
+    "dashboard": ["dashboard", "admin", "analytics", "management", "school", "student", "teacher", "crm", "inventory", "finance"],
+    "booking": ["booking", "appointment", "salon", "fitness", "coach", "clinic", "consultation", "service business"],
+    "mobile": ["mobile", "ios", "android", "app", "phone", "tracking", "chat"],
+    "website": ["website", "landing", "portfolio", "agency", "real estate", "property", "business site", "company"]
+}
+
+CATEGORY_PRESETS = {
+    "marketplace": {
+        "name": "MarketFlow",
+        "tagline": "Connect customers, vendors, and operators in one secure marketplace.",
+        "roles": ["Customer", "Vendor", "Operations Admin", "Support Agent"],
+        "features": ["Vendor onboarding", "Listings/catalog", "Cart or request flow", "Payments", "Order tracking", "Admin approvals"],
+        "pages": ["Homepage", "Vendor listing", "Product/service detail", "Checkout", "Customer dashboard", "Vendor dashboard", "Admin panel"],
+        "database": ["users", "vendors", "listings", "orders", "payments", "reviews", "support_tickets"],
+        "security": ["Role-based access control", "Payment webhook verification", "Input validation", "Rate limiting", "Audit logs"],
+        "monetization": ["Commission per transaction", "Vendor subscription", "Featured listings", "Service fees"],
+        "layout": "marketplace"
+    },
+    "ecommerce": {
+        "name": "StorePilot",
+        "tagline": "A polished online store with products, checkout, and growth tools.",
+        "roles": ["Customer", "Store Admin", "Fulfillment Manager"],
+        "features": ["Product catalog", "Cart", "Checkout", "Inventory tracking", "Order emails", "Discount codes"],
+        "pages": ["Home", "Shop", "Product detail", "Cart", "Checkout", "Order confirmation", "Admin inventory"],
+        "database": ["users", "products", "categories", "orders", "payments", "discounts", "shipments"],
+        "security": ["Secure checkout", "Webhook verification", "Admin access control", "Fraud checks", "Secure cookies"],
+        "monetization": ["Product sales", "Bundles", "Subscriptions", "Upsells"],
+        "layout": "store"
+    },
+    "dashboard": {
+        "name": "CommandDesk",
+        "tagline": "A secure dashboard for managing operations, users, and insights.",
+        "roles": ["Admin", "Manager", "Team Member", "Viewer"],
+        "features": ["Analytics overview", "User management", "Reports", "Tasks/workflows", "Notifications", "Settings"],
+        "pages": ["Overview", "Users", "Reports", "Tasks", "Activity logs", "Settings"],
+        "database": ["users", "teams", "tasks", "reports", "events", "notifications", "audit_logs"],
+        "security": ["RBAC permissions", "Audit logging", "Session security", "Data validation", "Admin action review"],
+        "monetization": ["Monthly subscription", "Team seats", "Premium reports", "Managed setup"],
+        "layout": "dashboard"
+    },
+    "booking": {
+        "name": "BooklyPro",
+        "tagline": "Let clients discover, book, and pay for services with confidence.",
+        "roles": ["Client", "Service Provider", "Business Admin"],
+        "features": ["Service catalog", "Availability calendar", "Booking form", "Payments/deposits", "Reminders", "Client records"],
+        "pages": ["Home", "Services", "Booking", "Provider profile", "Client dashboard", "Admin calendar"],
+        "database": ["users", "services", "providers", "availability", "bookings", "payments", "reminders"],
+        "security": ["Booking spam protection", "Payment verification", "Client data privacy", "Admin permissions", "Rate limits"],
+        "monetization": ["Booking fees", "Monthly subscription", "Premium provider profiles", "Deposits"],
+        "layout": "booking"
+    },
+    "mobile": {
+        "name": "AppPulse",
+        "tagline": "A mobile-first experience with clean flows and secure user journeys.",
+        "roles": ["Mobile User", "Admin", "Support"],
+        "features": ["Onboarding", "User profiles", "Push notification plan", "In-app actions", "Activity tracking", "Support chat"],
+        "pages": ["Splash", "Onboarding", "Home", "Details", "Profile", "Notifications", "Settings"],
+        "database": ["users", "profiles", "sessions", "activities", "notifications", "support_messages"],
+        "security": ["Secure sessions", "Device-aware login", "API rate limits", "Input validation", "Privacy-first profiles"],
+        "monetization": ["Freemium", "In-app subscriptions", "Premium features", "Partner offers"],
+        "layout": "mobile"
+    },
+    "website": {
+        "name": "LaunchSite",
+        "tagline": "A conversion-focused website built to explain, persuade, and capture leads.",
+        "roles": ["Visitor", "Lead", "Site Admin"],
+        "features": ["Hero CTA", "Services", "Testimonials", "Pricing", "FAQ", "Contact form"],
+        "pages": ["Home", "About", "Services", "Pricing", "Contact", "Privacy", "Terms"],
+        "database": ["leads", "contact_messages", "newsletter_subscribers", "analytics_events"],
+        "security": ["Spam protection", "Form validation", "Privacy policy", "Secure hosting", "Rate limits"],
+        "monetization": ["Lead generation", "Service packages", "Consulting", "Digital products"],
+        "layout": "website"
+    }
+}
+
+def detect_preview_category(idea: str, project_type: str = "auto") -> str:
+    normalized_type = (project_type or "auto").strip().lower().replace(" ", "_")
+    if normalized_type in CATEGORY_PRESETS:
+        return normalized_type
+
+    text = idea.lower()
+    scores = {}
+    for category, keywords in PREVIEW_KEYWORDS.items():
+        scores[category] = sum(1 for keyword in keywords if keyword in text)
+
+    best_category = max(scores, key=scores.get)
+    return best_category if scores[best_category] > 0 else "website"
+
+def personalize_preview(base: dict, idea: str, category: str) -> dict:
+    words = re.findall(r"[a-zA-Z0-9]+", idea)
+    meaningful = [w for w in words if len(w) > 3 and w.lower() not in {"build", "want", "need", "create", "with", "that", "this", "for", "app", "website"}]
+    focus = " ".join(meaningful[:4]).title() if meaningful else base["name"]
+
+    name = base["name"]
+    if category == "marketplace" and any(w in idea.lower() for w in ["food", "restaurant", "delivery"]):
+        name = "FoodFlow"
+    elif category == "website" and any(w in idea.lower() for w in ["property", "real estate", "agent"]):
+        name = "PrimeListings"
+    elif category == "ecommerce" and any(w in idea.lower() for w in ["fashion", "clothes", "clothing"]):
+        name = "StyleCart"
+    elif category == "booking" and any(w in idea.lower() for w in ["fitness", "coach", "gym"]):
+        name = "FitBookings"
+    elif meaningful:
+        name = re.sub(r"[^A-Za-z0-9]", "", focus.split()[0])[:12] + "AI"
+
+    return {**base, "name": name, "idea_focus": focus}
+
+@app.post("/preview/generate")
+async def generate_preview(payload: PreviewRequest, request: Request):
+    """Generate a no-cost rule-based app/website preview and blueprint."""
+    enforce_rate_limit(request, "preview", QUICK_SCAN_RATE_LIMIT)
+    idea = payload.idea.strip()
+    if len(idea) < 8:
+        raise HTTPException(status_code=400, detail="Please describe your idea in a little more detail")
+    if len(idea) > 600:
+        raise HTTPException(status_code=400, detail="Idea is too long. Please keep it under 600 characters")
+
+    category = detect_preview_category(idea, payload.project_type or "auto")
+    preset = personalize_preview(CATEGORY_PRESETS[category], idea, category)
+
+    return {
+        "success": True,
+        "category": category,
+        "layout": preset["layout"],
+        "name": preset["name"],
+        "idea_focus": preset["idea_focus"],
+        "tagline": preset["tagline"],
+        "summary": f"{preset['name']} is a {category.replace('_', ' ')} concept generated from your idea: {idea}",
+        "roles": preset["roles"],
+        "features": preset["features"],
+        "pages": preset["pages"],
+        "database": preset["database"],
+        "security": preset["security"],
+        "monetization": preset["monetization"],
+        "launch_plan": [
+            "Validate the idea with a landing page and waitlist",
+            "Build the core user flow first",
+            "Add payments and notifications after validation",
+            "Run security checks before launch",
+            "Launch to a small beta group and improve from feedback"
+        ],
+        "disclaimer": "This is a no-cost smart preview generated from templates and rules. Full AI build modules are coming soon."
+    }
 
 # ============================================
 # MAIN SCAN ENDPOINT
