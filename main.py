@@ -1,5 +1,5 @@
-"""AegisForge AI Backend v2.1 — Enterprise scanner + waitlist + preview."""
-from fastapi import FastAPI, HTTPException, Request
+"""AegisForge Backend v3.0 — Nova Core + Enterprise Scanner + Waitlist + Preview."""
+from fastapi import FastAPI, HTTPException, Request, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
@@ -41,7 +41,7 @@ SCAN_RATE_LIMIT = int(os.getenv("SCAN_RATE_LIMIT", "10"))
 RATE_LIMIT_STORE: dict = {}
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
-app = FastAPI(title="AegisForge AI Backend", version="2.2.0")
+app = FastAPI(title="AegisForge — Powered by Nova", version="3.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 class ScanRequest(BaseModel):
@@ -87,20 +87,6 @@ def sb_headers(extra=None):
     if extra: h.update(extra)
     return h
 def sb_ok(): return bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
-
-# ═══════════════════════════════════════════
-# BASIC ENDPOINTS
-# ═══════════════════════════════════════════
-@app.get("/")
-async def root():
-    return {"name": "AegisForge AI Backend", "status": "operational", "version": "2.2.0",
-            "endpoints": {"scan": "/scan", "quick_scan": "/quick-scan", "waitlist": "/waitlist",
-                          "preview": "/preview/generate", "ai_blueprint": "/ai/app-blueprint", "docs": "/docs"}}
-
-@app.get("/health")
-async def health():
-    return {"status": "healthy", "version": "2.2.0", "timestamp": datetime.now(timezone.utc).isoformat(),
-            "email_configured": bool(RESEND_API_KEY), "supabase_configured": sb_ok()}
 
 # ═══════════════════════════════════════════
 # FULL SCAN (v2.1)
@@ -463,6 +449,122 @@ async def generate_ai_blueprint(payload: AIBlueprintRequest, request: Request):
     return {"success": True, "blueprint": blueprint,
             "model": AI_MODEL, "provider": AI_PROVIDER,
             "generated_at": datetime.now(timezone.utc).isoformat()}
+
+# ═══════════════════════════════════════════
+# NOVA CORE v2 API (Step 2, 3, 6, 12)
+# ═══════════════════════════════════════════
+from nova.orchestrator import NovaOrchestrator
+from nova.memory import NovaMemory
+from nova.router import AgentRouter
+
+class NovaPromptRequest(BaseModel):
+    prompt: str
+    audience: Optional[str] = None
+    platform: Optional[str] = None
+    budget: Optional[str] = None
+    user_id: Optional[str] = None
+    project_id: Optional[str] = None
+
+# ── v2 Router ──
+v2 = APIRouter(prefix="/api/v2", tags=["Nova v2"])
+
+@v2.post("/nova/process")
+async def nova_process(payload: NovaPromptRequest, request: Request):
+    """Nova Core: Process a prompt through the full agent workflow."""
+    enforce_rate_limit(request, "nova", AI_DAILY_FREE_LIMIT)
+    prompt = payload.prompt.strip()
+    if len(prompt) < 3:
+        raise HTTPException(400, "Prompt too short")
+    if len(prompt) > 1000:
+        raise HTTPException(400, "Prompt too long (max 1000 chars)")
+    try:
+        result = await NovaOrchestrator.process_prompt(
+            prompt=prompt, user_id=payload.user_id, project_id=payload.project_id,
+            audience=payload.audience, platform=payload.platform, budget=payload.budget,
+        )
+        return {"success": True, **result}
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Nova processing failed: {str(e)}")
+
+@v2.post("/nova/classify")
+async def nova_classify(payload: NovaPromptRequest):
+    """Classify a prompt's intent and agent routing (no execution)."""
+    routing = AgentRouter.classify(payload.prompt)
+    return {"prompt": payload.prompt, **routing}
+
+@v2.get("/nova/memory/{user_id}")
+async def nova_get_memory(user_id: str):
+    """Get Nova's memory for a user."""
+    return await NovaMemory.get_context(user_id)
+
+@v2.get("/nova/agents")
+async def nova_list_agents():
+    """List all Nova agents and their capabilities."""
+    from nova.config import AGENTS
+    return {"agents": [{"id": k, **v} for k, v in AGENTS.items()]}
+
+@v2.get("/scan/history/{domain}")
+async def scan_history(domain: str):
+    """Get scan history for a domain (comparison support)."""
+    if not sb_ok():
+        raise HTTPException(501, "Database not configured")
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(f"{SUPABASE_URL}/rest/v1/{REPORTS_TABLE}",
+                headers=sb_headers(),
+                params={"domain": f"eq.{domain}", "order": "created_at.desc", "limit": "10",
+                        "select": "report_id,url,score,grade,created_at"})
+            r.raise_for_status()
+            return {"domain": domain, "scans": r.json()}
+    except Exception as e:
+        raise HTTPException(500, f"Could not fetch history: {str(e)}")
+
+# Mount v2 router
+app.include_router(v2)
+
+# ── v1 Router (backward compat) ──
+v1 = APIRouter(prefix="/api/v1", tags=["v1 compat"])
+
+@v1.post("/scan")
+async def v1_scan(payload: ScanRequest, request: Request):
+    return await scan_website(payload, request)
+
+@v1.post("/quick-scan")
+async def v1_quick_scan(payload: ScanRequest, request: Request):
+    return await quick_scan(payload, request)
+
+@v1.post("/waitlist")
+async def v1_waitlist(payload: WaitlistRequest, request: Request):
+    return await join_waitlist(payload, request)
+
+@v1.post("/preview/generate")
+async def v1_preview(payload: PreviewRequest, request: Request):
+    return await generate_preview(payload, request)
+
+@v1.post("/ai/app-blueprint")
+async def v1_blueprint(payload: AIBlueprintRequest, request: Request):
+    return await generate_ai_blueprint(payload, request)
+
+app.include_router(v1)
+
+# Update root + health
+@app.get("/")
+async def root():
+    return {"name": "AegisForge — Powered by Nova", "status": "operational", "version": "3.0.0",
+            "endpoints": {"v1": "/api/v1", "v2": "/api/v2",
+                          "scan": "/scan", "quick_scan": "/quick-scan",
+                          "waitlist": "/waitlist", "preview": "/preview/generate",
+                          "ai_blueprint": "/ai/app-blueprint",
+                          "nova_process": "/api/v2/nova/process",
+                          "docs": "/docs"}}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "version": "3.0.0", "timestamp": datetime.now(timezone.utc).isoformat(),
+            "email_configured": bool(RESEND_API_KEY), "supabase_configured": sb_ok(),
+            "ai_configured": bool(OPENAI_API_KEY or OPENROUTER_API_KEY)}
 
 # ═══════════════════════════════════════════
 # ADMIN
