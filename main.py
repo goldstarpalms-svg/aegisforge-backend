@@ -28,13 +28,20 @@ WAITLIST_TABLE = os.getenv("WAITLIST_TABLE", "waitlist")
 PREVIEW_REQUESTS_TABLE = os.getenv("PREVIEW_REQUESTS_TABLE", "preview_requests")
 REPORTS_TABLE = os.getenv("REPORTS_TABLE", "scan_reports")
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
+# AI Blueprint
+AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").lower()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
+AI_BLUEPRINTS_TABLE = os.getenv("AI_BLUEPRINTS_TABLE", "ai_blueprints")
+AI_DAILY_FREE_LIMIT = int(os.getenv("AI_DAILY_FREE_LIMIT", "3"))
 RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "3600"))
 WAITLIST_RATE_LIMIT = int(os.getenv("WAITLIST_RATE_LIMIT", "5"))
 SCAN_RATE_LIMIT = int(os.getenv("SCAN_RATE_LIMIT", "10"))
 RATE_LIMIT_STORE: dict = {}
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
-app = FastAPI(title="AegisForge AI Backend", version="2.1.0")
+app = FastAPI(title="AegisForge AI Backend", version="2.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 class ScanRequest(BaseModel):
@@ -44,6 +51,13 @@ class WaitlistRequest(BaseModel):
 class PreviewRequest(BaseModel):
     idea: str
     project_type: Optional[str] = "auto"
+
+class AIBlueprintRequest(BaseModel):
+    idea: str
+    audience: Optional[str] = None
+    platform: Optional[str] = None
+    budget: Optional[str] = None
+    email: Optional[str] = None
 
 # ═══════════════════════════════════════════
 # HELPERS
@@ -79,13 +93,13 @@ def sb_ok(): return bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
 # ═══════════════════════════════════════════
 @app.get("/")
 async def root():
-    return {"name": "AegisForge AI Backend", "status": "operational", "version": "2.1.0",
+    return {"name": "AegisForge AI Backend", "status": "operational", "version": "2.2.0",
             "endpoints": {"scan": "/scan", "quick_scan": "/quick-scan", "waitlist": "/waitlist",
-                          "preview": "/preview/generate", "docs": "/docs"}}
+                          "preview": "/preview/generate", "ai_blueprint": "/ai/app-blueprint", "docs": "/docs"}}
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "version": "2.1.0", "timestamp": datetime.now(timezone.utc).isoformat(),
+    return {"status": "healthy", "version": "2.2.0", "timestamp": datetime.now(timezone.utc).isoformat(),
             "email_configured": bool(RESEND_API_KEY), "supabase_configured": sb_ok()}
 
 # ═══════════════════════════════════════════
@@ -131,16 +145,16 @@ async def scan_website(payload: ScanRequest, request: Request):
             "scan_duration_seconds": duration, "report_id": report_id,
             "checks": checks, "risk_score": risk_score, "recommendations": recommendations,
         }
-        # Store report in Supabase (best-effort)
+        # Store report in Supabase (best-effort, async)
         if sb_ok():
             try:
-                import httpx as sync_httpx
-                sync_httpx.post(f"{SUPABASE_URL}/rest/v1/{REPORTS_TABLE}",
-                    headers=sb_headers({"Prefer": "return=minimal"}),
-                    json={"report_id": report_id, "url": url, "domain": domain,
-                          "score": risk_score["score"], "grade": risk_score["grade"],
-                          "checks_summary": {k: v.get("score", v.get("security_score")) for k, v in checks.items() if v.get("score") is not None or v.get("security_score") is not None}},
-                    timeout=5)
+                async with httpx.AsyncClient(timeout=5) as c:
+                    await c.post(f"{SUPABASE_URL}/rest/v1/{REPORTS_TABLE}",
+                        headers=sb_headers({"Prefer": "return=minimal"}),
+                        json={"report_id": report_id, "url": url, "domain": domain,
+                              "score": risk_score["score"], "grade": risk_score["grade"],
+                              "checks_summary": {k: v.get("score", v.get("security_score")) for k, v in checks.items() if v.get("score") is not None or v.get("security_score") is not None},
+                              "full_report": result})
             except Exception:
                 pass
         return result
@@ -339,6 +353,116 @@ async def generate_preview(payload: PreviewRequest, request: Request):
             "monetization": preset["monetization"],
             "launch_plan": ["Validate with a landing page","Build core flow first","Add payments after validation","Security check before launch","Launch to beta group"],
             "disclaimer": "Smart preview from guided templates. Full AI modules coming soon."}
+
+# ═══════════════════════════════════════════
+# AI BLUEPRINT GENERATOR (OpenAI / OpenRouter)
+# ═══════════════════════════════════════════
+BLUEPRINT_SYSTEM_PROMPT = """You are AegisForge AI, an expert software architect. Given an app idea, produce a detailed blueprint as JSON with these exact keys:
+- summary (string, 2-3 sentences)
+- suggested_name (string, catchy product name)
+- roles (array of strings, user roles like Customer, Admin, Vendor)
+- features (array of strings, 6-10 core features)
+- pages (array of strings, 5-8 pages/screens)
+- database_tables (array of strings, table names)
+- api_endpoints (array of objects with path, method, description)
+- security_checklist (array of strings, 4-6 security items)
+- deployment_plan (array of strings, 4-5 steps)
+- monetization (array of strings, 2-4 revenue models)
+- tech_stack (object with frontend, backend, database, hosting keys)
+
+Be practical, specific, and actionable. Respond with valid JSON only, no markdown fences."""
+
+async def _call_ai(prompt: str) -> str:
+    """Call AI provider (OpenAI or OpenRouter) and return raw text."""
+    if AI_PROVIDER == "openrouter" and OPENROUTER_API_KEY:
+        base_url = "https://openrouter.ai/api/v1"
+        api_key = OPENROUTER_API_KEY
+    elif OPENAI_API_KEY:
+        base_url = "https://api.openai.com/v1"
+        api_key = OPENAI_API_KEY
+    else:
+        raise HTTPException(500, "AI provider not configured (set OPENAI_API_KEY or OPENROUTER_API_KEY)")
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.post(f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": AI_MODEL, "messages": [
+                {"role": "system", "content": BLUEPRINT_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ], "temperature": 0.7, "max_tokens": 2000})
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]
+
+def _parse_blueprint(raw: str) -> dict:
+    """Parse AI response, stripping markdown fences if present."""
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # Try to find JSON object in the text
+        match = re.search(r"\{[\s\S]*\}", text)
+        if match:
+            return json.loads(match.group())
+        raise
+
+@app.post("/ai/app-blueprint")
+async def generate_ai_blueprint(payload: AIBlueprintRequest, request: Request):
+    enforce_rate_limit(request, "ai_blueprint", AI_DAILY_FREE_LIMIT)
+    idea = payload.idea.strip()
+    if len(idea) < 8:
+        raise HTTPException(400, "Describe your idea in at least 8 characters")
+    if len(idea) > 1000:
+        raise HTTPException(400, "Idea too long (max 1000 chars)")
+
+    # Build prompt
+    parts = [f"App idea: {idea}"]
+    if payload.audience:
+        parts.append(f"Target audience: {payload.audience}")
+    if payload.platform:
+        parts.append(f"Platform: {payload.platform}")
+    if payload.budget:
+        parts.append(f"Budget/stage: {payload.budget}")
+    prompt = "\n".join(parts)
+
+    try:
+        raw = await _call_ai(prompt)
+        blueprint = _parse_blueprint(raw)
+    except HTTPException:
+        raise
+    except json.JSONDecodeError:
+        raise HTTPException(502, "AI returned invalid JSON. Please try again.")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(502, f"AI provider error: {e.response.status_code}")
+    except Exception as e:
+        raise HTTPException(500, f"Blueprint generation failed: {str(e)}")
+
+    # Ensure required keys exist
+    defaults = {
+        "summary": idea, "suggested_name": "MyApp", "roles": [], "features": [],
+        "pages": [], "database_tables": [], "api_endpoints": [], "security_checklist": [],
+        "deployment_plan": [], "monetization": [], "tech_stack": {},
+    }
+    for k, v in defaults.items():
+        blueprint.setdefault(k, v)
+
+    # Store in Supabase (best-effort)
+    if sb_ok():
+        try:
+            async with httpx.AsyncClient(timeout=5) as c:
+                await c.post(f"{SUPABASE_URL}/rest/v1/{AI_BLUEPRINTS_TABLE}",
+                    headers=sb_headers({"Prefer": "return=minimal"}),
+                    json={"email": payload.email, "idea": idea,
+                          "audience": payload.audience, "platform": payload.platform,
+                          "budget": payload.budget, "output": blueprint,
+                          "model": AI_MODEL, "provider": AI_PROVIDER})
+        except Exception:
+            pass
+
+    return {"success": True, "blueprint": blueprint,
+            "model": AI_MODEL, "provider": AI_PROVIDER,
+            "generated_at": datetime.now(timezone.utc).isoformat()}
 
 # ═══════════════════════════════════════════
 # ADMIN
