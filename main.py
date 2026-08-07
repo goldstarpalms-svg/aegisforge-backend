@@ -41,7 +41,7 @@ SCAN_RATE_LIMIT = int(os.getenv("SCAN_RATE_LIMIT", "10"))
 RATE_LIMIT_STORE: dict = {}
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
-app = FastAPI(title="AegisForge — Powered by Nova", version="3.0.0")
+app = FastAPI(title="AegisForge — Powered by Nova", version="3.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 class ScanRequest(BaseModel):
