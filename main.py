@@ -1,4 +1,4 @@
-"""AegisForge Backend v3.0 — Nova Core + Enterprise Scanner + Waitlist + Preview."""
+"""AegisForge Backend v3.2 — Nova Core + Enterprise Scanner + Projects + Conversations."""
 from fastapi import FastAPI, HTTPException, Request, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -41,7 +41,9 @@ SCAN_RATE_LIMIT = int(os.getenv("SCAN_RATE_LIMIT", "10"))
 RATE_LIMIT_STORE: dict = {}
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
-app = FastAPI(title="AegisForge — Powered by Nova", version="3.1.0")
+START_TIME = time.time()
+
+app = FastAPI(title="AegisForge — Powered by Nova", version="3.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 class ScanRequest(BaseModel):
@@ -685,9 +687,131 @@ async def auth_debug():
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "version": "3.0.0", "timestamp": datetime.now(timezone.utc).isoformat(),
+    return {"status": "healthy", "version": "3.2.0", "timestamp": datetime.now(timezone.utc).isoformat(),
             "email_configured": bool(RESEND_API_KEY), "supabase_configured": sb_ok(),
-            "ai_configured": bool(OPENAI_API_KEY or OPENROUTER_API_KEY)}
+            "ai_configured": bool(OPENAI_API_KEY or OPENROUTER_API_KEY),
+            "uptime_s": round(time.time() - START_TIME, 1)}
+
+# ═══════════════════════════════════════════
+# PROJECTS & CONVERSATIONS (Persistence)
+# ═══════════════════════════════════════════
+class ProjectCreateRequest(BaseModel):
+    name: str
+    description: str = ""
+    domain: Optional[str] = None
+    status: Optional[str] = "draft"
+
+class ProjectUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    domain: Optional[str] = None
+    status: Optional[str] = None
+
+class ConversationCreateRequest(BaseModel):
+    project_id: Optional[str] = None
+    title: str = "New conversation"
+    messages: Optional[list] = []
+
+@app.post("/projects")
+async def create_project(payload: ProjectCreateRequest, request: Request):
+    """Create a new project for the authenticated user"""
+    if not sb_ok():
+        raise HTTPException(503, detail="Storage not configured")
+    user_id = request.headers.get("x-user-id")
+    if not user_id:
+        raise HTTPException(401, detail="User ID required")
+    project_id = f"proj-{crypto_rand(8)}"
+    now = datetime.now(timezone.utc).isoformat()
+    body = {"id": project_id, "user_id": user_id, "name": payload.name,
+            "description": payload.description, "domain": payload.domain,
+            "status": payload.status or "draft", "created_at": now, "updated_at": now,
+            "conversation_ids": [], "file_ids": [], "scan_ids": []}
+    async with httpx.AsyncClient(timeout=10) as c:
+        r = await c.post(f"{SUPABASE_URL}/rest/v1/projects", headers=sb_headers(), json=body)
+        if r.status_code >= 400:
+            raise HTTPException(r.status_code, detail=r.json().get("message", "Create failed"))
+    return {"ok": True, "id": project_id}
+
+@app.get("/projects")
+async def list_projects(request: Request):
+    """List projects for the authenticated user"""
+    if not sb_ok():
+        raise HTTPException(503, detail="Storage not configured")
+    user_id = request.headers.get("x-user-id")
+    if not user_id:
+        raise HTTPException(401, detail="User ID required")
+    async with httpx.AsyncClient(timeout=10) as c:
+        r = await c.get(f"{SUPABASE_URL}/rest/v1/projects", headers=sb_headers(),
+                        params={"user_id": f"eq.{user_id}", "order": "updated_at.desc", "limit": "100"})
+        if r.status_code >= 400:
+            raise HTTPException(r.status_code, detail="Fetch failed")
+    return r.json()
+
+@app.patch("/projects/{project_id}")
+async def update_project(project_id: str, payload: ProjectUpdateRequest):
+    """Update a project"""
+    if not sb_ok():
+        raise HTTPException(503, detail="Storage not configured")
+    updates = {k: v for k, v in payload.model_dump().items() if v is not None}
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    async with httpx.AsyncClient(timeout=10) as c:
+        r = await c.patch(f"{SUPABASE_URL}/rest/v1/projects", headers=sb_headers(),
+                          json=updates, params={"id": f"eq.{project_id}"})
+        if r.status_code >= 400:
+            raise HTTPException(r.status_code, detail="Update failed")
+    return {"ok": True}
+
+@app.delete("/projects/{project_id}")
+async def delete_project(project_id: str):
+    """Delete a project"""
+    if not sb_ok():
+        raise HTTPException(503, detail="Storage not configured")
+    async with httpx.AsyncClient(timeout=10) as c:
+        r = await c.delete(f"{SUPABASE_URL}/rest/v1/projects", headers=sb_headers(),
+                           params={"id": f"eq.{project_id}"})
+        if r.status_code >= 400:
+            raise HTTPException(r.status_code, detail="Delete failed")
+    return {"ok": True}
+
+@app.post("/conversations")
+async def create_conversation(payload: ConversationCreateRequest, request: Request):
+    """Save a conversation"""
+    if not sb_ok():
+        raise HTTPException(503, detail="Storage not configured")
+    user_id = request.headers.get("x-user-id")
+    if not user_id:
+        raise HTTPException(401, detail="User ID required")
+    convo_id = crypto_rand(12)
+    now = datetime.now(timezone.utc).isoformat()
+    body = {"id": convo_id, "user_id": user_id, "project_id": payload.project_id,
+            "title": payload.title, "messages": payload.messages or [],
+            "created_at": now, "updated_at": now}
+    async with httpx.AsyncClient(timeout=10) as c:
+        r = await c.post(f"{SUPABASE_URL}/rest/v1/conversations", headers=sb_headers(), json=body)
+        if r.status_code >= 400:
+            raise HTTPException(r.status_code, detail=r.json().get("message", "Create failed"))
+    return {"ok": True, "id": convo_id}
+
+@app.get("/conversations")
+async def list_conversations(request: Request):
+    """List conversations for the authenticated user"""
+    if not sb_ok():
+        raise HTTPException(503, detail="Storage not configured")
+    user_id = request.headers.get("x-user-id")
+    if not user_id:
+        raise HTTPException(401, detail="User ID required")
+    async with httpx.AsyncClient(timeout=10) as c:
+        r = await c.get(f"{SUPABASE_URL}/rest/v1/conversations", headers=sb_headers(),
+                        params={"user_id": f"eq.{user_id}", "order": "updated_at.desc", "limit": "50",
+                                "select": "id,title,project_id,created_at,updated_at"})
+        if r.status_code >= 400:
+            raise HTTPException(r.status_code, detail="Fetch failed")
+    return r.json()
+
+# Helper
+def crypto_rand(n: int) -> str:
+    import secrets, string
+    return ''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(n))
 
 # ═══════════════════════════════════════════
 # ADMIN
