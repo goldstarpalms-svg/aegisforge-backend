@@ -667,6 +667,22 @@ async def root():
                           "nova_process": "/api/v2/nova/process",
                           "docs": "/docs"}}
 
+@app.get("/auth/debug")
+async def auth_debug():
+    """Debug endpoint to verify Supabase URL is correct"""
+    url_valid = False
+    url_value = "NOT SET"
+    if SUPABASE_URL:
+        url_value = SUPABASE_URL[:30] + "..." if len(SUPABASE_URL) > 30 else SUPABASE_URL
+        url_valid = url_value.startswith("https://") and ".supabase.co" in url_value
+    return {
+        "supabase_url_set": bool(SUPABASE_URL),
+        "supabase_url_preview": url_value,
+        "supabase_url_format_valid": url_valid,
+        "supabase_key_set": bool(SUPABASE_SERVICE_ROLE_KEY),
+        "expected_format": "https://your-project.supabase.co",
+    }
+
 @app.get("/health")
 async def health():
     return {"status": "healthy", "version": "3.0.0", "timestamp": datetime.now(timezone.utc).isoformat(),
