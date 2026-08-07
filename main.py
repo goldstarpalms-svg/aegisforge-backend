@@ -89,6 +89,104 @@ def sb_headers(extra=None):
 def sb_ok(): return bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
 
 # ═══════════════════════════════════════════
+# AUTH (Supabase Auth proxy)
+# ═══════════════════════════════════════════
+class AuthSignUpRequest(BaseModel):
+    email: str
+    password: str
+    name: Optional[str] = None
+
+class AuthSignInRequest(BaseModel):
+    email: str
+    password: str
+
+class AuthResetPasswordRequest(BaseModel):
+    email: str
+
+@app.post("/auth/sign-up")
+async def auth_sign_up(payload: AuthSignUpRequest):
+    """Proxy sign-up to Supabase Auth"""
+    if not sb_ok():
+        raise HTTPException(status_code=503, detail="Authentication service is not configured. Please set SUPABASE_URL and SUPABASE_KEY on the backend.")
+    try:
+        body = {
+            "email": payload.email,
+            "password": payload.password,
+            "data": {"full_name": payload.name} if payload.name else {},
+        }
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/auth/v1/signup",
+                headers=sb_headers(),
+                json=body,
+            )
+            data = r.json()
+            if r.status_code >= 400:
+                detail = data.get("msg") or data.get("error_description") or data.get("message") or "Sign-up failed"
+                raise HTTPException(status_code=r.status_code, detail=detail)
+            return {"ok": True, "user": data.get("user"), "message": "Account created. Check your email for verification."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Auth service error: {str(e)}")
+
+@app.post("/auth/sign-in")
+async def auth_sign_in(payload: AuthSignInRequest):
+    """Proxy sign-in to Supabase Auth"""
+    if not sb_ok():
+        raise HTTPException(status_code=503, detail="Authentication service is not configured. Please set SUPABASE_URL and SUPABASE_KEY on the backend.")
+    try:
+        body = {
+            "email": payload.email,
+            "password": payload.password,
+            "gotrue_meta_security": {},
+        }
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/auth/v1/token?grant_type=password",
+                headers=sb_headers(),
+                json=body,
+            )
+            data = r.json()
+            if r.status_code >= 400:
+                detail = data.get("msg") or data.get("error_description") or data.get("message") or "Invalid email or password"
+                raise HTTPException(status_code=r.status_code, detail=detail)
+            return {
+                "ok": True,
+                "access_token": data.get("access_token"),
+                "refresh_token": data.get("refresh_token"),
+                "user": data.get("user"),
+                "message": "Signed in successfully.",
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Auth service error: {str(e)}")
+
+@app.post("/auth/reset-password")
+async def auth_reset_password(payload: AuthResetPasswordRequest):
+    """Proxy password reset to Supabase Auth"""
+    if not sb_ok():
+        raise HTTPException(status_code=503, detail="Authentication service is not configured. Please set SUPABASE_URL and SUPABASE_KEY on the backend.")
+    try:
+        body = {"email": payload.email}
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/auth/v1/recover",
+                headers=sb_headers(),
+                json=body,
+            )
+            data = r.json()
+            if r.status_code >= 400:
+                detail = data.get("msg") or data.get("error_description") or data.get("message") or "Reset request failed"
+                raise HTTPException(status_code=r.status_code, detail=detail)
+            return {"ok": True, "message": "If an account exists with that email, a reset link has been sent."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Auth service error: {str(e)}")
+
+# ═══════════════════════════════════════════
 # FULL SCAN (v2.1)
 # ═══════════════════════════════════════════
 @app.post("/scan")
