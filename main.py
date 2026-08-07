@@ -128,7 +128,10 @@ async def auth_sign_up(payload: AuthSignUpRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Auth service error: {str(e)}")
+        err_msg = str(e)
+        if "Name or service not known" in err_msg or "nodename nor servname" in err_msg:
+            raise HTTPException(status_code=503, detail="Authentication service URL is unreachable. Please verify SUPABASE_URL is set correctly on the backend.")
+        raise HTTPException(status_code=500, detail=f"Auth service error: {err_msg}")
 
 @app.post("/auth/sign-in")
 async def auth_sign_in(payload: AuthSignInRequest):
@@ -161,7 +164,10 @@ async def auth_sign_in(payload: AuthSignInRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Auth service error: {str(e)}")
+        err_msg = str(e)
+        if "Name or service not known" in err_msg or "nodename nor servname" in err_msg:
+            raise HTTPException(status_code=503, detail="Authentication service URL is unreachable. Please verify SUPABASE_URL is set correctly on the backend.")
+        raise HTTPException(status_code=500, detail=f"Auth service error: {err_msg}")
 
 @app.post("/auth/reset-password")
 async def auth_reset_password(payload: AuthResetPasswordRequest):
@@ -184,7 +190,10 @@ async def auth_reset_password(payload: AuthResetPasswordRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Auth service error: {str(e)}")
+        err_msg = str(e)
+        if "Name or service not known" in err_msg or "nodename nor servname" in err_msg:
+            raise HTTPException(status_code=503, detail="Authentication service URL is unreachable. Please verify SUPABASE_URL is set correctly on the backend.")
+        raise HTTPException(status_code=500, detail=f"Auth service error: {err_msg}")
 
 # ═══════════════════════════════════════════
 # FULL SCAN (v2.1)
