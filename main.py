@@ -674,7 +674,7 @@ async def auth_debug():
     url_value = "NOT SET"
     if SUPABASE_URL:
         url_value = SUPABASE_URL[:30] + "..." if len(SUPABASE_URL) > 30 else SUPABASE_URL
-        url_valid = url_value.startswith("https://") and ".supabase.co" in url_value
+        url_valid = SUPABASE_URL.startswith("https://") and ".supabase.co" in SUPABASE_URL
     return {
         "supabase_url_set": bool(SUPABASE_URL),
         "supabase_url_preview": url_value,
